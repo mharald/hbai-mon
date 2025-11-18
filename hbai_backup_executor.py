@@ -79,22 +79,24 @@ class CommandExecutor:
 set timeout 120
 log_user 1
 
-set target_host "{target_host}"
-set exec_command "{exec_command}"
+# Start cn to target host
+spawn cn {target_host}
 
-spawn cn $target_host
-
+# Variable to track if we got to the prompt
 set connected 0
 
+# Handle connection
 expect {{
-    "password:" {{
-        exp_continue
-    }}
-    -re "(master|root)@$target_host" {{
+#    "password:" {{
+#        # Wait for password to be handled by cn
+#        exp_continue
+#    }}
+    -re "(master|root)@{target_host}" {{
         set connected 1
+        # Check if we need sudo
         if {{[string match "*master@*" $expect_out(0,string)]}} {{
             send "sudo su\\r"
-            expect -re "root@$target_host"
+            expect -re "root@{target_host}"
         }}
     }}
     timeout {{
@@ -103,35 +105,30 @@ expect {{
     }}
 }}
 
+# Make sure we're connected
 if {{$connected == 0}} {{
     puts "ERROR: Failed to connect"
     exit 1
 }}
+sleep 10
+# Execute the command
+send "{exec_command}\\r"
 
-lines = raw_output.split('\n')
-output_lines = []
-capture = False
+# Wait for command to complete and return to prompt
+set timeout 60
+expect {{
+    -re "root@{target_host}.*#" {{
+        # Command completed
+    }}
+    timeout {{
+        puts "WARNING: Command timeout - output may be incomplete"
+    }}
+}}
 
-marker = "___END_OF_COMMAND_OUTPUT___"
-
-for line in lines:
-    # Start capturing AFTER we sent our command
-    if not capture:
-        if exec_command in line or command in line:
-            capture = True
-        continue
-
-    # Stop when marker arrives
-    if marker in line:
-        break
-
-    output_lines.append(line)
-
-result['stdout'] = '\n'.join(output_lines).strip()
-
+# Exit cleanly
 send "exit\\r"
 expect {{
-    "master@$target_host" {{
+    "master@{target_host}" {{
         send "exit\\r"
     }}
     eof {{}}
@@ -140,7 +137,7 @@ expect {{
 
 expect eof
 '''
-
+            
             # Write expect script to temp file
             temp_script_name = f"/tmp/cn_exec_{int(time.time())}.expect"
             write_script_cmd = f"cat > {temp_script_name} << 'EOFSCRIPT'\n{expect_script}\nEOFSCRIPT"
@@ -176,20 +173,26 @@ expect eof
             capture = False
             
             for line in lines:
-                # Start capturing after the sudo/root prompt
-                if not capture and ('root@' in line and '#' in line):
+                # Start capturing after we see the command being executed
+                if exec_command in line or command in line:
                     capture = True
                     continue
-            
+                    
+                # Stop at the next prompt or exit
                 if capture:
-                    # Stop at next prompt
                     if 'root@' in line and '#' in line:
                         break
-                    if 'master@' in line and ':' in line:
+                    if 'master@' in line:
                         break
-            
+                    if line.strip() == 'exit':
+                        break
+                    if 'ERROR:' in line or 'WARNING:' in line:
+                        if 'ERROR:' in line:
+                            result['error_message'] = line
+                        continue
+                        
                     output_lines.append(line)
-
+            
             # Join output, removing empty lines at start/end
             result['stdout'] = '\n'.join(output_lines).strip()
             

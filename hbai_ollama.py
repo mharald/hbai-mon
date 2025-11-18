@@ -73,39 +73,48 @@ CURRENT ISSUE:
 
 Your goal is to diagnose the root cause through targeted, READ-ONLY commands.
 
-IMPORTANT RULES:
-1. Propose ONE diagnostic command at a time
+CRITICAL RULES:
+1. NEVER repeat a command that has already been executed
 2. Commands must be READ-ONLY (no rm, delete, truncate, etc.)
-3. Start with broad analysis, then drill down based on results
-4. Check if databases/files are actually in use before recommending deletion
-5. For databases with old names (like "observium2023"), verify they're not still active
+3. Permission errors on lost+found are NORMAL and expected - ignore them
+4. Start with broad analysis, then drill down based on results
+5. Check if databases/files are actually in use before recommending deletion
+6. For databases with old names (like "observium2023"), verify they're not still active
+7. Look for large log files, old databases, and unnecessary binlogs
 
 """
         
-        # Add conversation history
+        # Add conversation history with clear labeling
         if history:
-            prompt += "DIAGNOSIS HISTORY:\n"
+            prompt += "\n=== COMMANDS ALREADY EXECUTED ===\n"
+            prompt += "DO NOT REPEAT THESE COMMANDS:\n\n"
+            
             for i, item in enumerate(history, 1):
                 if item.get('executed'):
-                    prompt += f"\nStep {i}: {item['command']}\n"
+                    prompt += f"Command #{i}: {item['command']}\n"
                     if item['success']:
-                        # Include only first 2000 chars of output to avoid token limits
-                        output = item['stdout'][:2000] if item['stdout'] else 'No output'
-                        prompt += f"Output:\n{output}\n"
-                        if len(item['stdout']) > 2000:
+                        # Include output
+                        output = item['stdout'][:3000] if item['stdout'] else 'No output'
+                        prompt += f"Result: SUCCESS\nOutput:\n{output}\n"
+                        if len(item['stdout']) > 3000:
                             prompt += "... (output truncated)\n"
                     else:
-                        prompt += f"Failed: {item.get('stderr', 'Unknown error')}\n"
+                        prompt += f"Result: FAILED\n"
+                        if item.get('stderr'):
+                            prompt += f"Error: {item['stderr'][:200]}\n"
+                    prompt += "\n"
                 else:
-                    prompt += f"\nStep {i}: {item['command']} (rejected by user)\n"
+                    prompt += f"Command #{i}: {item['command']} (REJECTED by user - do not retry)\n\n"
         
         prompt += """
+=== YOUR NEXT ACTION ===
 
-Based on the above, provide your next step.
+Based on the above results, provide your next diagnostic step.
+REMEMBER: Do NOT repeat any command from the history above!
 
 If you need more information to diagnose:
 Respond with:
-NEXT_COMMAND: [exact command to run]
+NEXT_COMMAND: [exact NEW command to run - must be different from all previous commands]
 EXPLANATION: [why this command helps diagnose the issue]
 
 If you have enough information to make recommendations:
@@ -117,12 +126,15 @@ RECOMMENDED_ACTIONS:
 2. [Second action with estimated space freed]
 ...
 
-For databases with old-looking names, always verify with commands like:
-- mysql -e "SELECT NOW() as current_time, MAX(UPDATE_TIME) as last_update FROM information_schema.TABLES WHERE TABLE_SCHEMA='database_name';"
-- lsof | grep database_name (to check if files are open)
-- ps aux | grep database_name (to check running processes)
+Common diagnostic commands to consider (if not already executed):
+- du -sh /path/to/mysql/* | sort -rh | head -20 (find largest items)
+- ls -lhS /path/to/mysql/ | head -20 (list by size)
+- mysql -e "SHOW BINARY LOGS;" (check binlog status)
+- mysql -e "SELECT table_schema, SUM(data_length + index_length)/1024/1024/1024 as size_gb FROM information_schema.tables GROUP BY table_schema ORDER BY size_gb DESC;"
+- find /path -type f -size +1G -exec ls -lh {} \; (find files over 1GB)
+- journalctl --disk-usage (check systemd journal size)
 
-Remember: Be thorough but efficient. Don't recommend deletion without verification."""
+Remember: Permission errors on 'lost+found' are normal. Focus on the actual data."""
         
         return prompt
     

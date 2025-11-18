@@ -327,7 +327,7 @@ class InteractiveDiagnostic:
                                              command=command, approved=False)
                 continue
             
-            # Execute the command
+           # Execute the command
             print(f"{Colors.OKCYAN}Executing command...{Colors.ENDC}")
             self.audit.log_ai_interaction('COMMAND_APPROVED', hostname, 
                                          command=command, approved=True)
@@ -349,8 +349,13 @@ class InteractiveDiagnostic:
                 print(f"{Colors.FAIL}✗ Command failed{Colors.ENDC}")
                 if result.get('error_message'):
                     print(f"  Error: {result['error_message']}")
+                    
+                # Still add failed commands to history with whatever output we got
+                # This ensures AI knows it was attempted
+                if not result.get('stdout'):
+                    result['stdout'] = f"Command failed: {result.get('error_message', 'Unknown error')}"
             
-            # Add to conversation history
+            # Add to conversation history (both success and failure)
             conversation_history.append({
                 'command': command,
                 'executed': True,
@@ -359,7 +364,7 @@ class InteractiveDiagnostic:
                 'exit_code': result.get('exit_code', -1),
                 'success': result['success']
             })
-            
+
             self.audit.log_ai_interaction('COMMAND_EXECUTED', hostname, 
                                          command=command,
                                          response=f"success={result['success']}")

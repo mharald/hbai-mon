@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interactive AI Analyzer Module for HBAI-MON v3
-Provides conversational AI diagnosis using Ollama
+Provides conversational AI diagnosis using Ollama with conversation history
 """
 
 import requests
@@ -11,8 +11,8 @@ import re
 from typing import Dict, List, Optional
 import urllib3
 from datetime import datetime
+import uuid
 
-# Disable SSL warnings for self-signed certificates
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
@@ -21,125 +21,149 @@ class InteractiveAIAnalyzer:
     
     def __init__(self, api_config: dict, audit_logger):
         self.api_url = api_config.get('url', 'https://ai.internal.boehmecke.org')
-        self.model = api_config.get('model', 'qwen2.5:3b')
+        self.model = api_config.get('model', 'qwen3:4b')
         self.api_key = api_config.get('key', '')
-        self.timeout = int(api_config.get('timeout', 300))  # 5 minute default
+        self.timeout = int(api_config.get('timeout', 300))
         self.verify_ssl = api_config.get('verify_ssl', 'false').lower() == 'true'
         self.audit = audit_logger
         
-        # API endpoints
         self.chat_endpoint = f"{self.api_url}/api/chat/completions"
+        self.chat_new_endpoint = f"{self.api_url}/api/v1/chats/new"
+        
+        self.messages = []
+        self.session_title = None
+        self.chat_id = None
+        self.chat_url = None
     
-    def get_next_diagnostic_command(self, problem_context: Dict, 
-                                   conversation_history: List[Dict]) -> Dict:
-        """
-        Get the next diagnostic command from AI based on conversation history
+    def start_session(self, hostname: str):
+        """Initialize a new diagnostic session"""
+        short_hostname = hostname.split('.')[0] if '.' in hostname else hostname
+        timestamp = datetime.now().strftime('%y%m%d-%H%M')
+        self.session_title = f"HBAI-{short_hostname}-{timestamp}"
         
-        Returns dict with:
-        - success: bool
-        - command: str (the command to execute)
-        - explanation: str (why this command)
-        - done: bool (whether diagnosis is complete)
-        - final_analysis: str (if done=True)
-        - recommended_actions: list (if done=True)
-        """
+        # Try to create chat session
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
         
-        # Build the conversation prompt
-        prompt = self._build_interactive_prompt(problem_context, conversation_history)
+        payload = {"chat": {"title": self.session_title, "model": self.model}}
         
-        # Send to AI
-        response = self._send_to_ai(prompt)
+        try:
+            response = requests.post(
+                self.chat_new_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=30,
+                verify=self.verify_ssl
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.chat_id = data.get('id')
+                if self.chat_id:
+                    self.chat_url = f"{self.api_url}/c/{self.chat_id}"
+                    self.audit.log('INFO', f'Created chat: {self.session_title}')
+        except:
+            pass
         
-        if not response:
-            return {
-                'success': False,
-                'error': 'No response from AI'
-            }
-        
-        # Parse the response
-        return self._parse_interactive_response(response)
-    
-    def _build_interactive_prompt(self, context: Dict, history: List[Dict]) -> str:
-        """Build prompt for next diagnostic step"""
-        
-        prompt = f"""You are an expert Linux systems administrator conducting an interactive diagnosis.
-
-CURRENT ISSUE:
-- System: {context['hostname']}
-- Mount Point: {context['mount_point']}
-- Disk Usage: {context['usage_percent']}%
-- Used: {context['used_gb']}GB of {context['total_gb']}GB
-- Free: {context['free_gb']}GB
-
-Your goal is to diagnose the root cause through targeted, READ-ONLY commands.
+        # Initialize system message with strict formatting rules
+        system_msg = """You are an expert Linux systems administrator conducting disk space diagnosis.
 
 CRITICAL RULES:
-1. NEVER repeat a command that has already been executed
-2. Commands must be READ-ONLY (no rm, delete, truncate, etc.)
-3. Permission errors on lost+found are NORMAL and expected - ignore them
-4. Start with broad analysis, then drill down based on results
-5. Check if databases/files are actually in use before recommending deletion
-6. For databases with old names (like "observium2023"), verify they're not still active
-7. Look for large log files, old databases, and unnecessary binlogs
+1. Always respond in EXACT format shown
+2. Use NEXT_COMMAND: and EXPLANATION: tags
+3. Commands must be READ-ONLY
+4. Never repeat commands already executed
 
-"""
+Session: """ + self.session_title + """
+System: """ + hostname
         
-        # Add conversation history with clear labeling
-        if history:
-            prompt += "\n=== COMMANDS ALREADY EXECUTED ===\n"
-            prompt += "DO NOT REPEAT THESE COMMANDS:\n\n"
-            
-            for i, item in enumerate(history, 1):
-                if item.get('executed'):
-                    prompt += f"Command #{i}: {item['command']}\n"
-                    if item['success']:
-                        # Include output
-                        output = item['stdout'][:3000] if item['stdout'] else 'No output'
-                        prompt += f"Result: SUCCESS\nOutput:\n{output}\n"
-                        if len(item['stdout']) > 3000:
-                            prompt += "... (output truncated)\n"
-                    else:
-                        prompt += f"Result: FAILED\n"
-                        if item.get('stderr'):
-                            prompt += f"Error: {item['stderr'][:200]}\n"
-                    prompt += "\n"
-                else:
-                    prompt += f"Command #{i}: {item['command']} (REJECTED by user - do not retry)\n\n"
-        
-        prompt += """
-=== YOUR NEXT ACTION ===
-
-Based on the above results, provide your next diagnostic step.
-REMEMBER: Do NOT repeat any command from the history above!
-
-If you need more information to diagnose:
-Respond with:
-NEXT_COMMAND: [exact NEW command to run - must be different from all previous commands]
-EXPLANATION: [why this command helps diagnose the issue]
-
-If you have enough information to make recommendations:
-Respond with:
-DIAGNOSIS_COMPLETE: true
-FINAL_ANALYSIS: [your complete analysis of the root cause]
-RECOMMENDED_ACTIONS:
-1. [First action with estimated space freed]
-2. [Second action with estimated space freed]
-...
-
-Common diagnostic commands to consider (if not already executed):
-- du -sh /path/to/mysql/* | sort -rh | head -20 (find largest items)
-- ls -lhS /path/to/mysql/ | head -20 (list by size)
-- mysql -e "SHOW BINARY LOGS;" (check binlog status)
-- mysql -e "SELECT table_schema, SUM(data_length + index_length)/1024/1024/1024 as size_gb FROM information_schema.tables GROUP BY table_schema ORDER BY size_gb DESC;"
-- find /path -type f -size +1G -exec ls -lh {} \; (find files over 1GB)
-- journalctl --disk-usage (check systemd journal size)
-
-Remember: Permission errors on 'lost+found' are normal. Focus on the actual data."""
-        
-        return prompt
+        self.messages = [{"role": "system", "content": system_msg}]
     
-    def _send_to_ai(self, prompt: str) -> Optional[str]:
-        """Send prompt to AI and get response"""
+    def get_next_diagnostic_command(self, problem_context: Dict, conversation_history: List[Dict]) -> Dict:
+        """Get next diagnostic command from AI"""
+        
+        user_message = self._build_context_message(problem_context, conversation_history)
+        
+        self.messages.append({"role": "user", "content": user_message})
+        self._persist_message_to_chat("user", user_message)
+        
+        response = self._send_to_ai()
+        
+        if not response:
+            return {'success': False, 'error': 'No response from AI'}
+        
+        self.messages.append({"role": "assistant", "content": response})
+        self._persist_message_to_chat("assistant", response)
+        
+        result = self._parse_interactive_response(response)
+        result['session_title'] = self.session_title
+        result['chat_url'] = self.chat_url
+        
+        return result
+    
+    def _build_context_message(self, context: Dict, history: List[Dict]) -> str:
+        """Build user message with current problem context and execution history"""
+        
+        if not history:
+            # First message
+            msg = "DISK SPACE ISSUE:\n"
+            msg += f"- System: {context['hostname']}\n"
+            msg += f"- Mount Point: {context['mount_point']}\n"
+            msg += f"- Usage: {context['usage_percent']}%\n"
+            msg += f"- Used: {context['used_gb']}GB of {context['total_gb']}GB\n"
+            msg += f"- Free: {context['free_gb']}GB\n\n"
+            msg += "CRITICAL: You must respond EXACTLY in this format (no other text):\n\n"
+            msg += "NEXT_COMMAND: [the exact command to run]\n"
+            msg += "EXPLANATION: [one sentence why this helps]\n\n"
+            msg += "IMPORTANT: For find commands, ALWAYS use '+' NOT '\\;'\n"
+            msg += "WRONG: find /path -exec ls {} \\;\n"
+            msg += "RIGHT:  find /path -exec ls {} +\n\n"
+            msg += "Example response:\n"
+            msg += f"NEXT_COMMAND: du -sh {context['mount_point']}/* | sort -rh | head -20\n"
+            msg += "EXPLANATION: This will show the 20 largest directories to identify what is using space."
+            return msg
+        
+        # Build message showing ALL command history
+        msg = "COMMANDS ALREADY EXECUTED (DO NOT REPEAT):\n\n"
+        
+        for i, cmd in enumerate(history, 1):
+            if cmd.get('executed'):
+                msg += f"{i}. {cmd['command']}"
+                if cmd['success']:
+                    msg += " - SUCCESS\n"
+                    output = cmd['stdout'][:500] if cmd['stdout'] else 'No output'
+                    msg += f"   Output: {output}\n"
+                else:
+                    msg += " - FAILED\n"
+                msg += "\n"
+            else:
+                msg += f"{i}. {cmd['command']} - REJECTED BY USER\n\n"
+        
+        # Show latest result in detail
+        latest = history[-1]
+        msg += "\nLATEST RESULT:\n"
+        if latest.get('executed') and latest['success']:
+            msg += f"Command: {latest['command']}\n"
+            msg += f"Output:\n{latest['stdout'][:2000]}\n"
+            if len(latest['stdout']) > 2000:
+                msg += "(output truncated)\n"
+        
+        msg += "\nCRITICAL: Respond EXACTLY in this format:\n\n"
+        msg += "NEXT_COMMAND: [exact NEW command - must be DIFFERENT from all commands above]\n"
+        msg += "EXPLANATION: [why this helps]\n\n"
+        msg += "OR if you have enough information to make recommendations:\n\n"
+        msg += "DIAGNOSIS_COMPLETE: true\n"
+        msg += "FINAL_ANALYSIS: [your complete analysis]\n"
+        msg += "RECOMMENDED_ACTIONS:\n"
+        msg += "1. [action with estimated space freed]\n"
+        msg += "2. [action with estimated space freed]"
+        
+        return msg
+    
+    def _send_to_ai(self) -> Optional[str]:
+        """Send full conversation to AI and get response"""
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {self.api_key}'
@@ -147,14 +171,12 @@ Remember: Permission errors on 'lost+found' are normal. Focus on the actual data
         
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
+            "messages": self.messages,
             "stream": False
         }
+        
+        if self.chat_id:
+            payload["chat_id"] = self.chat_id
         
         try:
             response = requests.post(
@@ -183,17 +205,77 @@ Remember: Permission errors on 'lost+found' are normal. Focus on the actual data
             self.audit.log('ERROR', f'AI API error: {str(e)}')
             return None
     
+
+    def _persist_message_to_chat(self, role: str, content: str):
+        """Persist messages by updating the full chat object"""
+        if not self.chat_id:
+            return
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {self.api_key}'
+        }
+        
+        try:
+            # Fetch current chat
+            get_response = requests.get(
+                f"{self.api_url}/api/v1/chats/{self.chat_id}",
+                headers=headers,
+                timeout=10,
+                verify=self.verify_ssl
+            )
+            
+            if get_response.status_code != 200:
+                self.audit.log('WARNING', f'Failed to fetch chat: {get_response.status_code}')
+                return
+            
+            chat_data = get_response.json()
+            
+            # Get existing messages or initialize
+            messages = chat_data.get('chat', {}).get('messages', [])
+            
+            # Add our new message with proper structure
+            messages.append({
+                "id": str(uuid.uuid4()),
+                "role": role,
+                "content": content,
+                "timestamp": int(time.time())
+            })
+            
+            # Update chat object
+            chat_data['chat']['messages'] = messages
+            
+            # Post back
+            update_response = requests.post(
+                f"{self.api_url}/api/v1/chats/{self.chat_id}",
+                headers=headers,
+                json=chat_data,
+                timeout=10,
+                verify=self.verify_ssl
+            )
+            
+            if update_response.status_code == 200:
+                self.audit.log('DEBUG', f'Persisted {role} message to chat')
+            else:
+                self.audit.log('WARNING', f'Failed to update chat: {update_response.status_code}')
+                
+        except Exception as e:
+            self.audit.log('WARNING', f'Error persisting message: {str(e)}')
+
     def _parse_interactive_response(self, response: str) -> Dict:
         """Parse AI response for next command or final analysis"""
         
-        # Check if diagnosis is complete
+        # DEBUG: Show what AI actually said
+        print("\n" + "="*80)
+        print("DEBUG: AI Raw Response:")
+        print(response)
+        print("="*80 + "\n")
+        
         if 'DIAGNOSIS_COMPLETE' in response and 'true' in response:
-            # Extract final analysis
             analysis_match = re.search(r'FINAL_ANALYSIS:\s*(.+?)(?=RECOMMENDED_ACTIONS:|$)', 
                                      response, re.DOTALL | re.IGNORECASE)
             final_analysis = analysis_match.group(1).strip() if analysis_match else ''
             
-            # Extract recommended actions
             actions = []
             actions_section = re.search(r'RECOMMENDED_ACTIONS:(.*?)$', 
                                       response, re.DOTALL | re.IGNORECASE)
@@ -209,7 +291,6 @@ Remember: Permission errors on 'lost+found' are normal. Focus on the actual data
                 'recommended_actions': actions
             }
         
-        # Extract next command
         command_match = re.search(r'NEXT_COMMAND:\s*(.+?)(?:\n|$)', response)
         explanation_match = re.search(r'EXPLANATION:\s*(.+?)(?:\n|$)', response)
         
@@ -221,8 +302,7 @@ Remember: Permission errors on 'lost+found' are normal. Focus on the actual data
                 'explanation': explanation_match.group(1).strip() if explanation_match else ''
             }
         
-        # Couldn't parse response
-        self.audit.log('WARNING', 'Could not parse AI response', {'response': response[:200]})
+        self.audit.log('WARNING', 'Could not parse AI response')
         return {
             'success': False,
             'error': 'Could not parse AI response'

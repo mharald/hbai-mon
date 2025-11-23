@@ -240,6 +240,10 @@ class InteractiveDiagnostic:
         print(f"  Usage: {Colors.WARNING}{usage_perc}%{Colors.ENDC} ({used_gb:.1f}GB used of {total_gb:.1f}GB)")
         print(f"{Colors.HEADER}{'='*80}{Colors.ENDC}\n")
         
+        # Initialize AI session
+        self.ai.start_session(hostname)
+        print(f"{Colors.OKCYAN}Session: {self.ai.session_title}{Colors.ENDC}\n")
+        
         self.audit.log_ai_interaction('ALERT_START', hostname, 
                                       command=f"disk:{mount_point}", 
                                       response=f"{usage_perc}% full")
@@ -281,6 +285,13 @@ class InteractiveDiagnostic:
             if ai_response.get('done', False):
                 print(f"\n{Colors.OKGREEN}✓ AI diagnosis complete{Colors.ENDC}")
                 
+                # Display chat session info
+                if ai_response.get('chat_id'):
+                    chat_url = self.ai.get_chat_url()
+                    print(f"\n{Colors.BOLD}Chat Session:{Colors.ENDC} {ai_response.get('chat_title', 'Unknown')}")
+                    if chat_url:
+                        print(f"{Colors.OKCYAN}View full conversation: {chat_url}{Colors.ENDC}")
+                
                 # Display final analysis
                 if ai_response.get('final_analysis'):
                     print(f"\n{Colors.BOLD}Final Analysis:{Colors.ENDC}")
@@ -294,7 +305,7 @@ class InteractiveDiagnostic:
                 self.audit.log_ai_interaction('DIAGNOSIS_COMPLETE', hostname, 
                                              response=ai_response.get('final_analysis', ''))
                 break
-            
+
             # Get the proposed command
             command = ai_response.get('command')
             explanation = ai_response.get('explanation', 'No explanation provided')

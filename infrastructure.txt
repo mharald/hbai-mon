@@ -1,0 +1,82 @@
+# Home Boehmecke Infrastructure
+# Format: hostname | type | role | notes
+#
+# Types:
+#   hypervisor = Proxmox physical host
+#   ctx        = LXC container (on Proxmox hbpm01)
+#   vm         = Virtual machine (on Proxmox hbpm01)
+#   appliance  = Network appliance (firewall, etc.)
+#   switch     = Network switch
+#   nas        = Network attached storage
+#
+# All hosts are DNS-reachable via .internal.boehmecke.org domain
+# Network equipment, NAS, and appliances: access via jumpserver hbcsrv14 (ProxyJump)
+#
+# Proxmox VMIDs for reference:
+#   Containers (pct): 100=hbcsrv01, 102=hbcsrv13, 103=hbcsrv02, 104=hbcsrv12,
+#                     106=hbcsrv07, 108=hbcsrv14, 109=hbcsrv06, 110=hbcsrv08,
+#                     113=hbcsrv15, 115=hbcsrv16, 116=hbcsrv17, 119=hbcsrv03,
+#                     120=hbcsrv04, 121=hbcsrv05, 122=hbcsrv10
+#   VMs (qm): 114=hbvsrv03, 117=hbvsrv15
+
+# Proxmox Hypervisor
+hbpm01.internal.boehmecke.org | hypervisor | proxmox | Primary hypervisor - hosts all VMs and containers
+
+# Administrative
+hbcsrv14.internal.boehmecke.org | ctx | jumpserver | Administrative jumpserver - gateway for network equipment, NAS, appliances
+
+# Core Services
+hbcsrv01.internal.boehmecke.org | ctx | bind-primary | Primary DNS server
+hbcsrv02.internal.boehmecke.org | ctx | bind-secondary | Secondary DNS server
+hbcsrv03.internal.boehmecke.org | ctx | dhcp-primary | Primary DHCP server
+hbcsrv04.internal.boehmecke.org | ctx | dhcp-secondary | Secondary DHCP server
+hbcsrv05.internal.boehmecke.org | ctx | freeradius-ca | FreeRADIUS + Certificate Authority
+hbcsrv06.internal.boehmecke.org | ctx | webserver | Docker host: open-webui, filerun, portainer-agent
+hbcsrv07.internal.boehmecke.org | ctx | wlan-controller | Omada WLAN Controller
+hbcsrv10.internal.boehmecke.org | ctx | dmz-server | DMZ Linux server
+hbcsrv12.internal.boehmecke.org | ctx | mysql-server | MySQL database server
+hbcsrv13.internal.boehmecke.org | ctx | monitoring | Observium monitoring server
+hbcsrv15.internal.boehmecke.org | ctx | elasticsearch-tika | ElasticSearch and Apache TIKA
+hbcsrv16.internal.boehmecke.org | ctx | portainer | Docker host: portainer-ce, radicale
+hbcsrv17.internal.boehmecke.org | ctx | cron-tasks | Remote cron/scheduled tasks server
+
+# Media & Applications
+hbcsrv08.internal.boehmecke.org | ctx | jellyfin | Media server (Jellyfin)
+
+# Network Equipment (access via hbcsrv14 ProxyJump)
+hbfwmgmt.internal.boehmecke.org | appliance | fortigate | FortiGate 50E firewall
+hbsw03.internal.boehmecke.org | switch | alcatel | Alcatel switch 03
+
+# Storage (access via hbcsrv14 ProxyJump)
+hblan.internal.boehmecke.org | nas | qnap | QNAP TS-419P II (4x SATA) - backups only
+hblanmc.internal.boehmecke.org | nas | qnap | QNAP TS-251+ - primary storage
+
+# Virtual Machines
+hbvsrv03.internal.boehmecke.org | vm | ntp | NTP server
+hbvsrv15.internal.boehmecke.org | vm | home-assistant | Home automation (alias: hbhass.internal.boehmecke.org)
+
+
+# SSH Port Forwarding Mapping
+# Format: hostname|short_name|forward_port|type
+
+hbpm01.internal.boehmecke.org|hbpm01|10001|hypervisor
+hbcsrv01.internal.boehmecke.org|hbcsrv01|10002|ctx
+hbcsrv02.internal.boehmecke.org|hbcsrv02|10003|ctx
+hbcsrv03.internal.boehmecke.org|hbcsrv03|10004|ctx
+hbcsrv04.internal.boehmecke.org|hbcsrv04|10005|ctx
+hbcsrv05.internal.boehmecke.org|hbcsrv05|10006|ctx
+hbcsrv06.internal.boehmecke.org|hbcsrv06|10007|ctx
+hbcsrv07.internal.boehmecke.org|hbcsrv07|10008|ctx
+hbcsrv10.internal.boehmecke.org|hbcsrv10|10009|ctx
+hbcsrv12.internal.boehmecke.org|hbcsrv12|10010|ctx
+hbcsrv13.internal.boehmecke.org|hbcsrv13|10011|ctx
+hbcsrv15.internal.boehmecke.org|hbcsrv15|10012|ctx
+hbcsrv16.internal.boehmecke.org|hbcsrv16|10013|ctx
+hbcsrv17.internal.boehmecke.org|hbcsrv17|10014|ctx
+hbcsrv08.internal.boehmecke.org|hbcsrv08|10015|ctx
+hbfwmgmt.internal.boehmecke.org|hbfwmgmt|10016|appliance
+hbsw03.internal.boehmecke.org|hbsw03|10017|switch
+hblan.internal.boehmecke.org|hblan|10018|nas
+hblanmc.internal.boehmecke.org|hblanmc|10019|nas
+hbvsrv03.internal.boehmecke.org|hbvsrv03|10020|vm
+hbvsrv15.internal.boehmecke.org|hbvsrv15|10021|vm

@@ -3,7 +3,7 @@
 HBAI-MON - Home Boehmecke AI Monitoring System
 Automated infrastructure monitoring with interactive AI diagnosis
 
-Version: 3.0.0 - Streamlined Interactive AI Analysis
+Version: 3.1.0 - Multi-host diagnosis with infrastructure awareness
 Author: Harald Boehmecke
 """
 
@@ -14,7 +14,7 @@ import configparser
 import logging
 import syslog
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 import mysql.connector
 from mysql.connector import Error
 import time
@@ -27,7 +27,10 @@ from hbai_ollama import InteractiveAIAnalyzer
 # Configuration paths
 CONFIG_DIR = "/etc/hbai-mon"
 CREDENTIALS_FILE = f"{CONFIG_DIR}/.credentials"
+AI_CONFIG_FILE = f"{CONFIG_DIR}/ai.conf"
 AUDIT_LOG_FILE = f"{CONFIG_DIR}/audit.log"
+INFRASTRUCTURE_FILE = f"{CONFIG_DIR}/infrastructure.txt"
+
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -44,21 +47,26 @@ class Colors:
 
 class AuditLogger:
     """Handles audit logging for AI interactions"""
-    
+
     def __init__(self, log_file: str):
+        # Ensure log directory exists
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+
         # Configure file logger
         self.file_logger = logging.getLogger('hbai_audit')
         self.file_logger.setLevel(logging.INFO)
-        
+
         # Create file handler
         file_handler = logging.FileHandler(log_file)
         file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(file_format)
         self.file_logger.addHandler(file_handler)
-        
+
         # Also log to syslog
         syslog.openlog("hbai-mon", syslog.LOG_PID, syslog.LOG_LOCAL0)
-    
+
     def log(self, level: str, message: str, details: dict = None):
         """Log an audit event"""
         log_entry = {
@@ -67,7 +75,7 @@ class AuditLogger:
             'message': message,
             'details': details or {}
         }
-        
+
         # Log to file
         log_str = json.dumps(log_entry)
         if level == 'ERROR':
@@ -79,8 +87,8 @@ class AuditLogger:
         else:
             self.file_logger.info(log_str)
             syslog.syslog(syslog.LOG_INFO, f"HBAI-MON: {message}")
-    
-    def log_ai_interaction(self, action: str, hostname: str, command: str = None, 
+
+    def log_ai_interaction(self, action: str, hostname: str, command: str = None,
                            response: str = None, approved: bool = None):
         """Log AI interaction details"""
         details = {
@@ -96,22 +104,22 @@ class AuditLogger:
 
 class DatabaseManager:
     """Handles all database connections and queries"""
-    
+
     def __init__(self, credentials_file: str, audit_logger: AuditLogger):
         self.credentials = self._load_credentials(credentials_file)
         self.conn_observium = None
         self.conn_hbai = None
         self.audit = audit_logger
-    
+
     def _load_credentials(self, filepath: str) -> configparser.ConfigParser:
         """Load credentials from INI file"""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"Credentials file not found: {filepath}")
-        
+
         config = configparser.ConfigParser()
         config.read(filepath)
         return config
-    
+
     def connect_observium(self) -> mysql.connector.MySQLConnection:
         """Connect to Observium database"""
         try:
@@ -127,7 +135,7 @@ class DatabaseManager:
         except Error as e:
             self.audit.log('ERROR', 'Failed to connect to Observium DB', {'error': str(e)})
             raise Exception(f"Failed to connect to Observium DB: {e}")
-    
+
     def connect_hbai(self) -> mysql.connector.MySQLConnection:
         """Connect to HBAI database"""
         try:
@@ -143,7 +151,7 @@ class DatabaseManager:
         except Error as e:
             self.audit.log('ERROR', 'Failed to connect to HBAI DB', {'error': str(e)})
             raise Exception(f"Failed to connect to HBAI DB: {e}")
-    
+
     def execute_query(self, connection: mysql.connector.MySQLConnection,
                      query: str, params: tuple = None,
                      fetch: bool = True) -> Optional[List]:
@@ -161,13 +169,11 @@ class DatabaseManager:
             return None
         finally:
             cursor.close()
-    
+
     def get_disk_alerts(self, threshold: int = 80) -> List[Dict]:
         """Fetch disk alerts from Observium - EXCLUDE DOWN HOSTS"""
         conn = self.connect_observium()
-        
-        # Query to get storage alerts over threshold
-        # IMPORTANT: Filter out devices that are down (status = 0) or ignored
+
         query = """
         SELECT
             s.storage_id,
@@ -182,10 +188,10 @@ class DatabaseManager:
         FROM storage s
         JOIN devices d ON s.device_id = d.device_id
         WHERE s.storage_perc >= %s
-            AND d.hostname LIKE 'hbc%%'
-            AND d.status = 1  -- ONLY UP HOSTS
-            AND d.ignore = 0  -- NOT IGNORED
-            AND d.disabled = 0  -- NOT DISABLED
+            AND d.hostname LIKE 'hb%%'
+            AND d.status = 1
+            AND d.ignore = 0
+            AND d.disabled = 0
             AND s.storage_ignore = 0
             AND s.storage_deleted = 0
             AND s.storage_type = 'hrStorageFixedDisk'
@@ -195,14 +201,14 @@ class DatabaseManager:
             AND s.storage_descr NOT LIKE '/run%%'
         ORDER BY s.storage_perc DESC
         """
-        
+
         results = self.execute_query(conn, query, (threshold,))
-        
+
         if results:
             self.audit.log('INFO', f'Found {len(results)} disk alerts above {threshold}%')
-        
+
         return results or []
-    
+
     def close_all(self):
         """Close all database connections"""
         if self.conn_observium and self.conn_observium.is_connected():
@@ -211,21 +217,122 @@ class DatabaseManager:
             self.conn_hbai.close()
 
 
+class InfrastructureInfo:
+    """Parses and provides infrastructure information"""
+
+    def __init__(self, infrastructure_file: str):
+        self.hosts = {}
+        self.jumpserver = None
+        self._load(infrastructure_file)
+
+    def _load(self, filepath: str):
+        """Load and parse infrastructure file"""
+        if not os.path.exists(filepath):
+            return
+
+        with open(filepath, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+
+                parts = [p.strip() for p in line.split('|')]
+                if len(parts) >= 3:
+                    hostname = parts[0]
+                    host_type = parts[1]
+                    role = parts[2]
+                    notes = parts[3] if len(parts) > 3 else ''
+
+                    self.hosts[hostname] = {
+                        'type': host_type,
+                        'role': role,
+                        'notes': notes
+                    }
+
+                    if role == 'jumpserver':
+                        self.jumpserver = hostname
+
+    def needs_jumpserver(self, hostname: str) -> bool:
+        """Check if host requires jumpserver access"""
+        if hostname not in self.hosts:
+            return False
+
+        host_type = self.hosts[hostname]['type']
+        return host_type in ('nas', 'switch', 'appliance')
+
+    def get_host_info(self, hostname: str) -> Optional[Dict]:
+        """Get info about a host"""
+        return self.hosts.get(hostname)
+
+    def resolve_short_hostname(self, short_name: str) -> Optional[str]:
+        """Resolve short hostname to FQDN"""
+        # Direct match
+        if short_name in self.hosts:
+            return short_name
+
+        # Try adding domain
+        fqdn = f"{short_name}.internal.boehmecke.org"
+        if fqdn in self.hosts:
+            return fqdn
+
+        # Search for partial match
+        for hostname in self.hosts:
+            if hostname.startswith(short_name + '.'):
+                return hostname
+
+        return None
+
+
+def load_ai_config(config_file: str, credentials_file: str) -> Dict[str, str]:
+    """Load AI configuration from ai.conf and merge with API key from credentials"""
+    if not os.path.exists(config_file):
+        raise FileNotFoundError(f"AI configuration file not found: {config_file}")
+    
+    if not os.path.exists(credentials_file):
+        raise FileNotFoundError(f"Credentials file not found: {credentials_file}")
+    
+    # Load ai.conf
+    config = configparser.ConfigParser()
+    config.read(config_file)
+    
+    if 'ollama' not in config:
+        raise ValueError(f"[ollama] section missing in {config_file}")
+    
+    ai_config = dict(config['ollama'])
+    
+    # Load API key from credentials
+    creds = configparser.ConfigParser()
+    creds.read(credentials_file)
+    
+    if 'ollama_api' not in creds:
+        raise ValueError(f"[ollama_api] section missing in {credentials_file}")
+    
+    if 'key' not in creds['ollama_api']:
+        raise ValueError(f"'key' field missing in [ollama_api] section of {credentials_file}")
+    
+    # Merge: add API key from credentials
+    ai_config['key'] = creds['ollama_api']['key']
+    
+    return ai_config
+
+
 class InteractiveDiagnostic:
     """Handles interactive diagnostic flow with AI"""
-    
-    def __init__(self, db_manager: DatabaseManager, audit_logger: AuditLogger):
+
+    def __init__(self, db_manager: DatabaseManager, audit_logger: AuditLogger, ai_config: Dict[str, str]):
         self.db = db_manager
         self.audit = audit_logger
-        
-        # Initialize AI analyzer
-        ollama_config = dict(self.db.credentials['ollama_api'])
-        self.ai = InteractiveAIAnalyzer(ollama_config, audit_logger)
-        
+
+        # Initialize AI analyzer with merged config
+        self.ai = InteractiveAIAnalyzer(ai_config, audit_logger)
+
         # Initialize command executor
         ssh_creds = dict(self.db.credentials['ssh_default'])
         self.executor = CommandExecutor(ssh_creds, audit_logger)
-    
+
+        # Load infrastructure info
+        self.infra = InfrastructureInfo(INFRASTRUCTURE_FILE)
+
     def process_alert(self, alert: Dict) -> bool:
         """Process a single disk alert interactively with AI"""
         hostname = alert['hostname']
@@ -234,20 +341,16 @@ class InteractiveDiagnostic:
         used_gb = alert['storage_used'] / (1024**3) if alert['storage_used'] else 0
         total_gb = alert['storage_size'] / (1024**3) if alert['storage_size'] else 0
         free_gb = total_gb - used_gb
-        
+
         print(f"\n{Colors.HEADER}{'='*80}{Colors.ENDC}")
         print(f"{Colors.BOLD}Processing Alert: {hostname}:{mount_point}{Colors.ENDC}")
         print(f"  Usage: {Colors.WARNING}{usage_perc}%{Colors.ENDC} ({used_gb:.1f}GB used of {total_gb:.1f}GB)")
         print(f"{Colors.HEADER}{'='*80}{Colors.ENDC}\n")
-        
-        # Initialize AI session
-        self.ai.start_session(hostname)
-        print(f"{Colors.OKCYAN}Session: {self.ai.session_title}{Colors.ENDC}\n")
-        
-        self.audit.log_ai_interaction('ALERT_START', hostname, 
-                                      command=f"disk:{mount_point}", 
+
+        self.audit.log_ai_interaction('ALERT_START', hostname,
+                                      command=f"disk:{mount_point}",
                                       response=f"{usage_perc}% full")
-        
+
         # Initial problem context
         problem_context = {
             'hostname': hostname,
@@ -257,73 +360,86 @@ class InteractiveDiagnostic:
             'total_gb': round(total_gb, 2),
             'free_gb': round(free_gb, 2)
         }
-        
+
         # Start interactive diagnosis
         conversation_history = []
-        max_iterations = 10  # Prevent infinite loops
+        max_iterations = 50
         iteration = 0
-        
-        print(f"{Colors.OKCYAN}Starting AI-driven interactive diagnosis...{Colors.ENDC}\n")
-        
+
+        print(f"{Colors.OKCYAN}Starting AI-driven interactive diagnosis (max {max_iterations} commands)...{Colors.ENDC}\n")
+
         while iteration < max_iterations:
             iteration += 1
-            
-            # Get AI recommendation for next diagnostic command
-            print(f"{Colors.OKBLUE}Requesting AI diagnostic recommendation...{Colors.ENDC}")
+
+            # Get AI recommendation
+            print(f"{Colors.OKBLUE}[{iteration}/{max_iterations}] Requesting AI diagnostic recommendation...{Colors.ENDC}")
             ai_response = self.ai.get_next_diagnostic_command(
-                problem_context, 
+                problem_context,
                 conversation_history
             )
-            
+
             if not ai_response['success']:
                 print(f"{Colors.FAIL}AI analysis failed: {ai_response.get('error', 'Unknown error')}{Colors.ENDC}")
-                self.audit.log('ERROR', f"AI analysis failed for {hostname}", 
+                if ai_response.get('raw_response'):
+                    print(f"{Colors.WARNING}Raw response: {ai_response['raw_response'][:200]}...{Colors.ENDC}")
+                self.audit.log('ERROR', f"AI analysis failed for {hostname}",
                              {'error': ai_response.get('error')})
                 break
-            
+
             # Check if AI is done
             if ai_response.get('done', False):
-                print(f"\n{Colors.OKGREEN}✓ AI diagnosis complete{Colors.ENDC}")
-                
-                # Display chat session info
-                if ai_response.get('chat_id'):
-                    chat_url = self.ai.get_chat_url()
-                    print(f"\n{Colors.BOLD}Chat Session:{Colors.ENDC} {ai_response.get('chat_title', 'Unknown')}")
-                    if chat_url:
-                        print(f"{Colors.OKCYAN}View full conversation: {chat_url}{Colors.ENDC}")
-                
+                print(f"\n{Colors.OKGREEN}{'='*80}{Colors.ENDC}")
+                print(f"{Colors.OKGREEN}✓ AI diagnosis complete after {iteration-1} commands{Colors.ENDC}")
+                print(f"{Colors.OKGREEN}{'='*80}{Colors.ENDC}")
+
                 # Display final analysis
                 if ai_response.get('final_analysis'):
                     print(f"\n{Colors.BOLD}Final Analysis:{Colors.ENDC}")
                     print(ai_response['final_analysis'])
-                
+
                 if ai_response.get('recommended_actions'):
                     print(f"\n{Colors.BOLD}Recommended Actions:{Colors.ENDC}")
                     for i, action in enumerate(ai_response['recommended_actions'], 1):
                         print(f"  {i}. {action}")
-                
-                self.audit.log_ai_interaction('DIAGNOSIS_COMPLETE', hostname, 
+
+                self.audit.log_ai_interaction('DIAGNOSIS_COMPLETE', hostname,
                                              response=ai_response.get('final_analysis', ''))
                 break
 
-            # Get the proposed command
+            # Get the proposed command and target
             command = ai_response.get('command')
+            target_host = ai_response.get('target_host', hostname)
             explanation = ai_response.get('explanation', 'No explanation provided')
-            
+
             if not command:
                 print(f"{Colors.WARNING}AI did not provide a command. Ending diagnosis.{Colors.ENDC}")
                 break
-            
+
+            # Resolve target host if needed
+            if target_host and not target_host.endswith('.internal.boehmecke.org'):
+                resolved = self.infra.resolve_short_hostname(target_host)
+                if resolved:
+                    target_host = resolved
+                else:
+                    # Default to alerting host if can't resolve
+                    print(f"{Colors.WARNING}Could not resolve host '{target_host}', using {hostname}{Colors.ENDC}")
+                    target_host = hostname
+
             # Display AI's recommendation
             print(f"\n{Colors.BOLD}AI Recommendation:{Colors.ENDC}")
+            print(f"  {Colors.OKCYAN}Target:{Colors.ENDC}  {target_host}")
             print(f"  {Colors.OKCYAN}Command:{Colors.ENDC} {command}")
             print(f"  {Colors.OKCYAN}Purpose:{Colors.ENDC} {explanation}")
-            
+
             # Ask user for permission
-            print(f"\n{Colors.BOLD}Execute this command? (y/n/s=skip to next alert): {Colors.ENDC}", end='')
+            print(f"\n{Colors.BOLD}Execute this command? (y/n/s=skip alert/q=quit): {Colors.ENDC}", end='')
             user_input = input().strip().lower()
-            
-            if user_input == 's':
+
+            if user_input == 'q':
+                print(f"{Colors.WARNING}Quitting diagnosis...{Colors.ENDC}")
+                self.audit.log_ai_interaction('DIAGNOSIS_QUIT', hostname)
+                return False
+            elif user_input == 's':
                 print(f"{Colors.WARNING}Skipping to next alert...{Colors.ENDC}")
                 self.audit.log_ai_interaction('COMMAND_SKIPPED', hostname, command=command)
                 return False
@@ -331,44 +447,43 @@ class InteractiveDiagnostic:
                 print(f"{Colors.WARNING}Command rejected. Requesting alternative...{Colors.ENDC}")
                 conversation_history.append({
                     'command': command,
+                    'target_host': target_host,
                     'executed': False,
                     'reason': 'User rejected command'
                 })
-                self.audit.log_ai_interaction('COMMAND_REJECTED', hostname, 
+                self.audit.log_ai_interaction('COMMAND_REJECTED', hostname,
                                              command=command, approved=False)
                 continue
-            
-           # Execute the command
-            print(f"{Colors.OKCYAN}Executing command...{Colors.ENDC}")
-            self.audit.log_ai_interaction('COMMAND_APPROVED', hostname, 
+
+            # Execute the command (all commands go through cn script on jumpserver)
+            print(f"{Colors.OKCYAN}Executing command on {target_host}...{Colors.ENDC}")
+            self.audit.log_ai_interaction('COMMAND_APPROVED', target_host,
                                          command=command, approved=True)
-            
-            result = self.executor.execute_single_diagnostic(hostname, command)
-            
+
+            result = self.executor.execute_single_diagnostic(target_host, command)
+
             # Display result summary
             if result['success']:
                 print(f"{Colors.OKGREEN}✓ Command executed successfully{Colors.ENDC}")
                 if result['stdout']:
-                    # Show first 20 lines of output
                     lines = result['stdout'].split('\n')[:20]
                     print(f"\n{Colors.BOLD}Output:{Colors.ENDC}")
                     for line in lines:
                         print(f"  {line}")
                     if len(result['stdout'].split('\n')) > 20:
-                        print(f"  {Colors.OKBLUE}... (truncated){Colors.ENDC}")
+                        print(f"  {Colors.OKBLUE}... (truncated, {len(result['stdout'].split(chr(10)))} lines total){Colors.ENDC}")
             else:
                 print(f"{Colors.FAIL}✗ Command failed{Colors.ENDC}")
                 if result.get('error_message'):
                     print(f"  Error: {result['error_message']}")
-                    
-                # Still add failed commands to history with whatever output we got
-                # This ensures AI knows it was attempted
+
                 if not result.get('stdout'):
                     result['stdout'] = f"Command failed: {result.get('error_message', 'Unknown error')}"
-            
-            # Add to conversation history (both success and failure)
+
+            # Add to conversation history
             conversation_history.append({
                 'command': command,
+                'target_host': target_host,
                 'executed': True,
                 'stdout': result.get('stdout', ''),
                 'stderr': result.get('stderr', ''),
@@ -376,82 +491,112 @@ class InteractiveDiagnostic:
                 'success': result['success']
             })
 
-            self.audit.log_ai_interaction('COMMAND_EXECUTED', hostname, 
+            # Show progress
+            print(f"\n{Colors.OKBLUE}[Progress] {len([h for h in conversation_history if h.get('executed')])} commands executed{Colors.ENDC}")
+
+            self.audit.log_ai_interaction('COMMAND_EXECUTED', target_host,
                                          command=command,
                                          response=f"success={result['success']}")
-        
+
+        if iteration >= max_iterations:
+            print(f"\n{Colors.WARNING}Reached maximum iterations ({max_iterations}). Ending diagnosis.{Colors.ENDC}")
+            self.audit.log('WARNING', f'Max iterations reached for {hostname}')
+
         print(f"\n{Colors.HEADER}{'='*80}{Colors.ENDC}")
         return True
-    
+
     def run(self):
         """Main execution flow"""
         print(f"""
 {Colors.HEADER}╔══════════════════════════════════════════════════════════════╗
 ║                                                              ║
 ║   {Colors.BOLD}HBAI-MON{Colors.ENDC}{Colors.HEADER} - Automated Disk Space Monitoring            ║
-║   Version 3.0 - Interactive AI Diagnosis                     ║
+║   Version 3.1.0 - Multi-host AI Diagnosis                    ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝{Colors.ENDC}
         """)
-        
+
         self.audit.log('INFO', 'HBAI-MON started', {'user': os.getenv('USER', 'unknown')})
-        
-        # Get disk alerts (automatically excludes down hosts)
+
+        # Check infrastructure file
+        if not os.path.exists(INFRASTRUCTURE_FILE):
+            print(f"{Colors.WARNING}⚠ Infrastructure file not found: {INFRASTRUCTURE_FILE}{Colors.ENDC}")
+            print(f"{Colors.WARNING}  AI will have limited context about your infrastructure.{Colors.ENDC}\n")
+
+        # Get disk alerts
         print(f"{Colors.OKCYAN}Scanning for disk issues (excluding down hosts)...{Colors.ENDC}\n")
         alerts = self.db.get_disk_alerts()
-        
+
         if not alerts:
-            print(f"{Colors.OKGREEN}✓ No disk issues found (or all issues are on down hosts){Colors.ENDC}")
+            print(f"{Colors.OKGREEN}✓ No disk issues found{Colors.ENDC}")
             self.audit.log('INFO', 'No disk issues found')
             return
-        
+
         print(f"Found {Colors.WARNING}{len(alerts)}{Colors.ENDC} disk issues:\n")
-        for alert in alerts:
-            print(f"  • {alert['hostname']}:{alert['storage_descr']} - "
-                  f"{Colors.WARNING}{alert['storage_perc']}%{Colors.ENDC}")
-        
-        # Process each alert interactively
         for i, alert in enumerate(alerts, 1):
-            print(f"\n{Colors.BOLD}[{i}/{len(alerts)}] Processing alert {i} of {len(alerts)}{Colors.ENDC}")
-            
+            print(f"  {i}. {alert['hostname']}:{alert['storage_descr']} - "
+                  f"{Colors.WARNING}{alert['storage_perc']}%{Colors.ENDC}")
+
+        print()  # Empty line before processing
+
+        # Process each alert
+        for i, alert in enumerate(alerts, 1):
+            print(f"\n{Colors.BOLD}[Alert {i}/{len(alerts)}]{Colors.ENDC}")
+
             try:
                 should_continue = self.process_alert(alert)
                 if not should_continue:
-                    print(f"\n{Colors.WARNING}Alert skipped by user{Colors.ENDC}")
+                    # Check if user wants to continue to next alert or quit entirely
+                    if i < len(alerts):
+                        print(f"\n{Colors.BOLD}Continue to next alert? (y/n): {Colors.ENDC}", end='')
+                        if input().strip().lower() != 'y':
+                            print(f"{Colors.WARNING}Exiting...{Colors.ENDC}")
+                            break
             except KeyboardInterrupt:
                 print(f"\n\n{Colors.WARNING}Interrupted by user{Colors.ENDC}")
                 self.audit.log('INFO', 'HBAI-MON interrupted by user')
                 break
             except Exception as e:
                 print(f"\n{Colors.FAIL}Error processing alert: {e}{Colors.ENDC}")
-                self.audit.log('ERROR', f'Error processing alert for {alert["hostname"]}', 
+                self.audit.log('ERROR', f'Error processing alert for {alert["hostname"]}',
                              {'error': str(e)})
+                import traceback
+                traceback.print_exc()
                 continue
-        
-        print(f"\n{Colors.OKGREEN}✓ All alerts processed{Colors.ENDC}")
+
+        print(f"\n{Colors.OKGREEN}✓ Session complete{Colors.ENDC}")
         self.audit.log('INFO', 'HBAI-MON completed')
         print(f"\nAudit log: {AUDIT_LOG_FILE}")
 
 
 def main():
     """Main entry point"""
-    # Initialize audit logger
+    # Create audit logger (will create directory if needed)
     audit = AuditLogger(AUDIT_LOG_FILE)
-    
-    # Check if credentials file exists
+
+    # Check for credentials file
     if not os.path.exists(CREDENTIALS_FILE):
         print(f"{Colors.FAIL}Error: Credentials file not found at {CREDENTIALS_FILE}{Colors.ENDC}")
         audit.log('ERROR', 'Credentials file not found', {'path': CREDENTIALS_FILE})
         sys.exit(1)
-    
+
+    # Load AI configuration (merges ai.conf + API key from credentials)
     try:
-        # Initialize database manager
+        ai_config = load_ai_config(AI_CONFIG_FILE, CREDENTIALS_FILE)
+        audit.log('INFO', 'AI configuration loaded', {
+            'model': ai_config.get('model'),
+            'min_commands': ai_config.get('min_commands_required', 10)
+        })
+    except Exception as e:
+        print(f"{Colors.FAIL}Error loading AI configuration: {e}{Colors.ENDC}")
+        audit.log('ERROR', 'Failed to load AI configuration', {'error': str(e)})
+        sys.exit(1)
+
+    try:
         db_manager = DatabaseManager(CREDENTIALS_FILE, audit)
-        
-        # Run interactive diagnostic
-        diagnostic = InteractiveDiagnostic(db_manager, audit)
+        diagnostic = InteractiveDiagnostic(db_manager, audit, ai_config)
         diagnostic.run()
-        
+
     except KeyboardInterrupt:
         print(f"\n\n{Colors.WARNING}Program interrupted{Colors.ENDC}")
         audit.log('INFO', 'Program interrupted by user')

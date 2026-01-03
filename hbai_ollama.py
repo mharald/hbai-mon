@@ -1,309 +1,410 @@
 #!/usr/bin/env python3
 """
-Interactive AI Analyzer Module for HBAI-MON v3
-Provides conversational AI diagnosis using Ollama with conversation history
+Interactive AI Analyzer Module for HBAI-MON v3.1
+Uses direct Ollama API with command deduplication and infrastructure awareness
 """
 
 import requests
 import json
 import time
 import re
+import difflib
+import os
 from typing import Dict, List, Optional
 import urllib3
-from datetime import datetime
-import uuid
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Configuration
+CONFIG_DIR = "/etc/hbai-mon"
+INFRASTRUCTURE_FILE = f"{CONFIG_DIR}/infrastructure.txt"
+
 
 class InteractiveAIAnalyzer:
-    """Interactive AI analyzer that conducts conversational diagnosis"""
-    
+    """Interactive AI analyzer using Ollama's native chat API"""
+
     def __init__(self, api_config: dict, audit_logger):
-        self.api_url = api_config.get('url', 'https://ai.internal.boehmecke.org')
-        self.model = api_config.get('model', 'qwen3:4b')
-        self.api_key = api_config.get('key', '')
+        # Debug: Log what we received
+        audit_logger.log('INFO', 'Received api_config', {'keys': list(api_config.keys())})
+
+        # Ollama is at /ollama path on the Open-WebUI server
+        base_url = api_config.get('url', 'https://ai.internal.boehmecke.org')
+        self.api_url = f"{base_url}/ollama"
+        self.model = api_config.get('model', 'qwen2.5-coder:3b')
+        # Try multiple possible key names
+        self.api_key = api_config.get('key') or api_config.get('api_key', '')
         self.timeout = int(api_config.get('timeout', 300))
         self.verify_ssl = api_config.get('verify_ssl', 'false').lower() == 'true'
+        
+        # Minimum commands required before AI can conclude
+        self.min_commands_required = int(api_config.get('min_commands_required', 10))
+        
         self.audit = audit_logger
-        
-        self.chat_endpoint = f"{self.api_url}/api/chat/completions"
-        self.chat_new_endpoint = f"{self.api_url}/api/v1/chats/new"
-        
-        self.messages = []
-        self.session_title = None
-        self.chat_id = None
-        self.chat_url = None
-    
-    def start_session(self, hostname: str):
-        """Initialize a new diagnostic session"""
-        short_hostname = hostname.split('.')[0] if '.' in hostname else hostname
-        timestamp = datetime.now().strftime('%y%m%d-%H%M')
-        self.session_title = f"HBAI-{short_hostname}-{timestamp}"
-        
-        # Try to create chat session
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.api_key}'
-        }
-        
-        payload = {"chat": {"title": self.session_title, "model": self.model}}
-        
-        try:
-            response = requests.post(
-                self.chat_new_endpoint,
-                headers=headers,
-                json=payload,
-                timeout=30,
-                verify=self.verify_ssl
-            )
-            
-            if response.status_code == 200:
-                data = response.json()
-                self.chat_id = data.get('id')
-                if self.chat_id:
-                    self.chat_url = f"{self.api_url}/c/{self.chat_id}"
-                    self.audit.log('INFO', f'Created chat: {self.session_title}')
-        except:
-            pass
-        
-        # Initialize system message with strict formatting rules
-        system_msg = """You are an expert Linux systems administrator conducting disk space diagnosis.
 
-CRITICAL RULES:
-1. Always respond in EXACT format shown
-2. Use NEXT_COMMAND: and EXPLANATION: tags
-3. Commands must be READ-ONLY
-4. Never repeat commands already executed
+        # Ollama native chat endpoint
+        self.chat_endpoint = f"{self.api_url}/api/chat"
 
-Session: """ + self.session_title + """
-System: """ + hostname
-        
-        self.messages = [{"role": "system", "content": system_msg}]
-    
-    def get_next_diagnostic_command(self, problem_context: Dict, conversation_history: List[Dict]) -> Dict:
-        """Get next diagnostic command from AI"""
-        
-        user_message = self._build_context_message(problem_context, conversation_history)
-        
-        self.messages.append({"role": "user", "content": user_message})
-        self._persist_message_to_chat("user", user_message)
-        
-        response = self._send_to_ai()
-        
-        if not response:
-            return {'success': False, 'error': 'No response from AI'}
-        
-        self.messages.append({"role": "assistant", "content": response})
-        self._persist_message_to_chat("assistant", response)
-        
-        result = self._parse_interactive_response(response)
-        result['session_title'] = self.session_title
-        result['chat_url'] = self.chat_url
-        
-        return result
-    
-    def _build_context_message(self, context: Dict, history: List[Dict]) -> str:
-        """Build user message with current problem context and execution history"""
-        
-        if not history:
-            # First message
-            msg = "DISK SPACE ISSUE:\n"
-            msg += f"- System: {context['hostname']}\n"
-            msg += f"- Mount Point: {context['mount_point']}\n"
-            msg += f"- Usage: {context['usage_percent']}%\n"
-            msg += f"- Used: {context['used_gb']}GB of {context['total_gb']}GB\n"
-            msg += f"- Free: {context['free_gb']}GB\n\n"
-            msg += "CRITICAL: You must respond EXACTLY in this format (no other text):\n\n"
-            msg += "NEXT_COMMAND: [the exact command to run]\n"
-            msg += "EXPLANATION: [one sentence why this helps]\n\n"
-            msg += "IMPORTANT: For find commands, ALWAYS use '+' NOT '\\;'\n"
-            msg += "WRONG: find /path -exec ls {} \\;\n"
-            msg += "RIGHT:  find /path -exec ls {} +\n\n"
-            msg += "Example response:\n"
-            msg += f"NEXT_COMMAND: du -sh {context['mount_point']}/* | sort -rh | head -20\n"
-            msg += "EXPLANATION: This will show the 20 largest directories to identify what is using space."
-            return msg
-        
-        # Build message showing ALL command history
-        msg = "COMMANDS ALREADY EXECUTED (DO NOT REPEAT):\n\n"
-        
-        for i, cmd in enumerate(history, 1):
-            if cmd.get('executed'):
-                msg += f"{i}. {cmd['command']}"
-                if cmd['success']:
-                    msg += " - SUCCESS\n"
-                    output = cmd['stdout'][:500] if cmd['stdout'] else 'No output'
-                    msg += f"   Output: {output}\n"
+        # Load infrastructure info
+        self.infrastructure = self._load_infrastructure()
+
+        self.audit.log('INFO', f'Initialized Ollama API: {self.chat_endpoint}')
+        self.audit.log('INFO', f'Model: {self.model}')
+        self.audit.log('INFO', f'Minimum commands required: {self.min_commands_required}')
+        self.audit.log('INFO', f'API key present: {bool(self.api_key)}')
+        self.audit.log('INFO', f'API key length: {len(self.api_key) if self.api_key else 0}')
+        if self.api_key:
+            self.audit.log('INFO', f'API key prefix: {self.api_key[:10]}...')
+        self.audit.log('INFO', f'Infrastructure loaded: {len(self.infrastructure)} hosts')
+
+    def _load_infrastructure(self) -> str:
+        """Load infrastructure description from file"""
+        if os.path.exists(INFRASTRUCTURE_FILE):
+            try:
+                with open(INFRASTRUCTURE_FILE, 'r') as f:
+                    return f.read()
+            except Exception as e:
+                self.audit.log('WARNING', f'Failed to load infrastructure file: {e}')
+        return "Infrastructure file not available."
+
+    def _is_command_similar(self, new_command: str, existing_commands: List[str], threshold: float = 0.7) -> bool:
+        """Check if new command is too similar to any existing command"""
+
+        # Normalize commands (remove extra spaces, lowercase)
+        new_cmd_normalized = ' '.join(new_command.lower().split())
+
+        for existing in existing_commands:
+            existing_normalized = ' '.join(existing.lower().split())
+
+            # Calculate similarity ratio
+            similarity = difflib.SequenceMatcher(None, new_cmd_normalized, existing_normalized).ratio()
+
+            if similarity > threshold:
+                self.audit.log('WARNING', f'Command too similar',
+                             {'new': new_command, 'existing': existing, 'similarity': f'{similarity:.2f}'})
+                return True
+
+        return False
+
+    def get_next_diagnostic_command(self, problem_context: Dict,
+                                   conversation_history: List[Dict]) -> Dict:
+        """Get next command with similarity checking"""
+
+        # Track already executed commands
+        executed_commands = [item['command'] for item in conversation_history if item.get('executed')]
+        num_executed = len(executed_commands)
+
+        # Try up to 3 times to get a unique command
+        max_attempts = 3
+        messages = self._build_conversation_messages(problem_context, conversation_history)
+
+        for attempt in range(max_attempts):
+
+            # Get AI response
+            response = self._send_to_ollama(messages)
+
+            if not response:
+                return {'success': False, 'error': 'No response from Ollama'}
+
+            # Parse response
+            result = self._parse_interactive_response(response)
+
+            if not result['success']:
+                return result
+
+            # CHECK: AI wants to finish, but have we executed enough commands?
+            if result.get('done', False):
+                if num_executed >= self.min_commands_required:
+                    # OK to finish
+                    self.audit.log('INFO', f'AI completed diagnosis after {num_executed} commands (minimum: {self.min_commands_required})')
+                    return result
                 else:
-                    msg += " - FAILED\n"
-                msg += "\n"
-            else:
-                msg += f"{i}. {cmd['command']} - REJECTED BY USER\n\n"
-        
-        # Show latest result in detail
-        latest = history[-1]
-        msg += "\nLATEST RESULT:\n"
-        if latest.get('executed') and latest['success']:
-            msg += f"Command: {latest['command']}\n"
-            msg += f"Output:\n{latest['stdout'][:2000]}\n"
-            if len(latest['stdout']) > 2000:
-                msg += "(output truncated)\n"
-        
-        msg += "\nCRITICAL: Respond EXACTLY in this format:\n\n"
-        msg += "NEXT_COMMAND: [exact NEW command - must be DIFFERENT from all commands above]\n"
-        msg += "EXPLANATION: [why this helps]\n\n"
-        msg += "OR if you have enough information to make recommendations:\n\n"
-        msg += "DIAGNOSIS_COMPLETE: true\n"
-        msg += "FINAL_ANALYSIS: [your complete analysis]\n"
-        msg += "RECOMMENDED_ACTIONS:\n"
-        msg += "1. [action with estimated space freed]\n"
-        msg += "2. [action with estimated space freed]"
-        
-        return msg
-    
-    def _send_to_ai(self) -> Optional[str]:
-        """Send full conversation to AI and get response"""
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.api_key}'
+                    # REJECT - not enough commands yet
+                    self.audit.log('WARNING', f'AI tried to finish early after only {num_executed} commands (minimum: {self.min_commands_required})')
+                    
+                    # Tell AI to continue
+                    messages.append({
+                        "role": "assistant",
+                        "content": result.get('raw_response', 'DIAGNOSIS_COMPLETE: true')
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": f"❌ REJECTED: You must execute at least {self.min_commands_required} diagnostic commands before concluding.\n\n" +
+                                  f"So far you have only executed {num_executed} commands.\n\n" +
+                                  f"You need to run {self.min_commands_required - num_executed} more commands.\n\n" +
+                                  f"Continue with the next diagnostic command using a different approach."
+                    })
+                    continue  # Try again
+
+            # Check if command is too similar to existing ones
+            new_command = result.get('command', '')
+
+            if not self._is_command_similar(new_command, executed_commands, threshold=0.7):
+                # Command is sufficiently different
+                self.audit.log('INFO', f'AI suggested unique command: {new_command[:50]}...')
+                return result
+
+            # Command is too similar - tell AI and retry
+            self.audit.log('INFO', f'AI suggested similar command (attempt {attempt+1}/{max_attempts})',
+                         {'suggested': new_command})
+
+            # Add rejection to conversation
+            messages.append({
+                "role": "assistant",
+                "content": f"TARGET_HOST: {result.get('target_host', problem_context['hostname'])}\nNEXT_COMMAND: {new_command}\nEXPLANATION: {result.get('explanation', '')}"
+            })
+            messages.append({
+                "role": "user",
+                "content": f"❌ REJECTED: That command is too similar to already executed commands.\n\n" +
+                          f"Already executed:\n" +
+                          '\n'.join(f"- {cmd}" for cmd in executed_commands) +
+                          f"\n\nYour suggestion '{new_command}' is basically the same.\n\n" +
+                          f"Suggest something COMPLETELY DIFFERENT - a different approach entirely."
+            })
+
+        # Failed to get unique command after max attempts
+        return {
+            'success': False,
+            'error': f'AI could not suggest a unique command after {max_attempts} attempts. Try larger model or manual intervention.'
         }
+
+    def _build_conversation_messages(self, context: Dict, history: List[Dict]) -> List[Dict]:
+        """Build proper conversation messages for Ollama chat API"""
+
+        messages = []
         
+        # Count executed commands
+        num_executed = len([h for h in history if h.get('executed')])
+
+        # System message with infrastructure context and strict rules
+        system_content = f"""You are an expert Linux systems administrator conducting interactive diagnosis on a home infrastructure.
+
+INFRASTRUCTURE OVERVIEW:
+{self.infrastructure}
+
+ABSOLUTE RULES:
+1. You MUST execute at least {self.min_commands_required} diagnostic commands before you can conclude
+2. NEVER repeat a command that has already been executed
+3. NEVER suggest minor variations (like changing head -20 to head -10)
+4. Suggest COMPLETELY DIFFERENT approaches
+5. All commands must be READ-ONLY (no rm, delete, truncate, write operations)
+6. Permission errors on 'lost+found' are NORMAL - ignore them
+7. You can run commands on ANY host in the infrastructure - specify TARGET_HOST
+8. For containers/VMs with issues, you may also check the hypervisor (hbpm01)
+9. For network equipment, NAS, or appliances, use the jumpserver (hbcsrv14)
+10. Consider checking related services (e.g., if MySQL disk is full, check the app servers using it)
+
+AVAILABLE DIAGNOSTIC APPROACHES:
+- Disk usage: du, find, ncdu, ls, df, lsof
+- Process analysis: ps, top, lsof, /proc
+- Log analysis: journalctl, /var/log/*, dmesg
+- Docker: docker ps, docker stats, docker system df
+- Proxmox (on hbpm01): pct exec, pvesm, zfs list, lvs
+- Service status: systemctl, service
+- Network: ss, netstat, ip
+- Filesystem: mount, findmnt, tune2fs, xfs_info"""
+
+        messages.append({
+            "role": "system",
+            "content": system_content
+        })
+
+        # Track executed commands with their targets
+        executed_cmds = []
+
+        # Add conversation history as proper message pairs
+        for item in history:
+            if item.get('executed'):
+                target = item.get('target_host', context['hostname'])
+                executed_cmds.append(f"{target}: {item['command']}")
+
+                # User executed command
+                messages.append({
+                    "role": "user",
+                    "content": f"I executed on {target}: {item['command']}"
+                })
+
+                # Assistant sees the result
+                if item.get('success'):
+                    result = f"Output:\n{item['stdout'][:3000]}"
+                    if len(item.get('stdout', '')) > 3000:
+                        result += "\n... (truncated)"
+                else:
+                    result = f"Error: {item.get('stderr', 'Unknown error')}"
+
+                messages.append({
+                    "role": "assistant",
+                    "content": result
+                })
+
+        # Build current prompt
+        current_prompt = f"""
+{'='*80}
+⚠️  COMMANDS ALREADY EXECUTED - DO NOT REPEAT OR VARY THESE:
+{'='*80}
+"""
+
+        if executed_cmds:
+            for i, cmd in enumerate(executed_cmds, 1):
+                current_prompt += f"❌ {i}. {cmd}\n"
+        else:
+            current_prompt += "✓ No commands executed yet\n"
+
+        current_prompt += f"""
+{'='*80}
+
+PROGRESS: {num_executed}/{self.min_commands_required} commands executed (minimum required: {self.min_commands_required})
+
+CURRENT PROBLEM:
+- Alerting Host: {context['hostname']}
+- Mount Point: {context['mount_point']}
+- Usage: {context['usage_percent']}% ({context['used_gb']}GB used / {context['total_gb']}GB total)
+- Free Space: {context['free_gb']}GB
+
+YOUR TASK:
+Analyze the problem and suggest the next diagnostic command. You may:
+1. Run a command on the alerting host ({context['hostname']})
+2. Run a command on the hypervisor (hbpm01) to check container/VM level
+3. Run a command on a related host (e.g., check what's writing to this server)
+
+Use a COMPLETELY DIFFERENT APPROACH than the commands already executed.
+
+RESPONSE FORMAT (exactly as shown):
+TARGET_HOST: [hostname - must be from infrastructure list]
+NEXT_COMMAND: [single command, read-only only]
+EXPLANATION: [why this helps diagnose the issue]
+
+{'DO NOT use DIAGNOSIS_COMPLETE until you have executed at least ' + str(self.min_commands_required) + ' commands!' if num_executed < self.min_commands_required else 'You may now use DIAGNOSIS_COMPLETE if you have enough information:'}
+"""
+
+        if num_executed >= self.min_commands_required:
+            current_prompt += """
+OR if you have enough information to conclude:
+DIAGNOSIS_COMPLETE: true
+FINAL_ANALYSIS: [your analysis of what's consuming space and why]
+RECOMMENDED_ACTIONS:
+1. [specific action with command if applicable]
+2. [another action]
+"""
+
+        messages.append({
+            "role": "user",
+            "content": current_prompt
+        })
+
+        return messages
+
+    def _send_to_ollama(self, messages: List[Dict]) -> Optional[str]:
+        """Send to Ollama's native chat API"""
+
         payload = {
             "model": self.model,
-            "messages": self.messages,
-            "stream": False
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": 0.7,
+                "num_ctx": 16384,
+                "num_predict": 1024,
+                "top_p": 0.9,
+                "repeat_penalty": 1.3
+            }
         }
-        
-        if self.chat_id:
-            payload["chat_id"] = self.chat_id
-        
+
+        headers = {
+            "Content-Type": "application/json"
+        }
+
+        # Add Authorization header only if API key is present
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            self.audit.log('DEBUG', 'Using API key for authentication')
+        else:
+            self.audit.log('WARNING', 'No API key configured - request may fail')
+
         try:
+            self.audit.log('INFO', f'Sending request to Ollama ({len(messages)} messages)')
+            self.audit.log('DEBUG', f'Request URL: {self.chat_endpoint}')
+
             response = requests.post(
                 self.chat_endpoint,
-                headers=headers,
                 json=payload,
+                headers=headers,
                 timeout=self.timeout,
                 verify=self.verify_ssl
             )
-            
-            if response.status_code != 200:
-                self.audit.log('ERROR', f'AI API returned status {response.status_code}')
-                return None
-            
-            data = response.json()
-            choices = data.get('choices', [])
-            if not choices:
-                return None
-            
-            return choices[0].get('message', {}).get('content', '')
-            
-        except requests.exceptions.Timeout:
-            self.audit.log('ERROR', f'AI API timeout after {self.timeout}s')
-            return None
-        except Exception as e:
-            self.audit.log('ERROR', f'AI API error: {str(e)}')
-            return None
-    
 
-    def _persist_message_to_chat(self, role: str, content: str):
-        """Persist messages by updating the full chat object"""
-        if not self.chat_id:
-            return
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {self.api_key}'
-        }
-        
-        try:
-            # Fetch current chat
-            get_response = requests.get(
-                f"{self.api_url}/api/v1/chats/{self.chat_id}",
-                headers=headers,
-                timeout=10,
-                verify=self.verify_ssl
-            )
-            
-            if get_response.status_code != 200:
-                self.audit.log('WARNING', f'Failed to fetch chat: {get_response.status_code}')
-                return
-            
-            chat_data = get_response.json()
-            
-            # Get existing messages or initialize
-            messages = chat_data.get('chat', {}).get('messages', [])
-            
-            # Add our new message with proper structure
-            messages.append({
-                "id": str(uuid.uuid4()),
-                "role": role,
-                "content": content,
-                "timestamp": int(time.time())
-            })
-            
-            # Update chat object
-            chat_data['chat']['messages'] = messages
-            
-            # Post back
-            update_response = requests.post(
-                f"{self.api_url}/api/v1/chats/{self.chat_id}",
-                headers=headers,
-                json=chat_data,
-                timeout=10,
-                verify=self.verify_ssl
-            )
-            
-            if update_response.status_code == 200:
-                self.audit.log('DEBUG', f'Persisted {role} message to chat')
-            else:
-                self.audit.log('WARNING', f'Failed to update chat: {update_response.status_code}')
-                
+            if response.status_code != 200:
+                self.audit.log('ERROR', f'Ollama returned status {response.status_code}',
+                             {'response': response.text[:500]})
+                return None
+
+            data = response.json()
+            content = data.get('message', {}).get('content', '')
+
+            self.audit.log('INFO', f'Received response ({len(content)} chars)')
+            return content
+
+        except requests.exceptions.Timeout:
+            self.audit.log('ERROR', f'Ollama API timeout after {self.timeout}s')
+            return None
         except Exception as e:
-            self.audit.log('WARNING', f'Error persisting message: {str(e)}')
+            self.audit.log('ERROR', f'Ollama API error: {str(e)}')
+            return None
 
     def _parse_interactive_response(self, response: str) -> Dict:
-        """Parse AI response for next command or final analysis"""
-        
-        # DEBUG: Show what AI actually said
-        print("\n" + "="*80)
-        print("DEBUG: AI Raw Response:")
-        print(response)
-        print("="*80 + "\n")
-        
-        if 'DIAGNOSIS_COMPLETE' in response and 'true' in response:
-            analysis_match = re.search(r'FINAL_ANALYSIS:\s*(.+?)(?=RECOMMENDED_ACTIONS:|$)', 
-                                     response, re.DOTALL | re.IGNORECASE)
+        """Parse Ollama response with target host support"""
+
+        # Check if diagnosis is complete
+        if re.search(r'DIAGNOSIS_COMPLETE:\s*true', response, re.IGNORECASE):
+
+            analysis_match = re.search(
+                r'FINAL_ANALYSIS:\s*(.+?)(?=RECOMMENDED_ACTIONS:|$)',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
             final_analysis = analysis_match.group(1).strip() if analysis_match else ''
-            
+
             actions = []
-            actions_section = re.search(r'RECOMMENDED_ACTIONS:(.*?)$', 
-                                      response, re.DOTALL | re.IGNORECASE)
+            actions_section = re.search(
+                r'RECOMMENDED_ACTIONS:(.*?)$',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
             if actions_section:
                 actions_text = actions_section.group(1)
-                action_lines = re.findall(r'^\d+\.\s*(.+)$', actions_text, re.MULTILINE)
-                actions = action_lines
-            
+                action_lines = re.findall(r'^\d+\.\s*(.+?)$', actions_text, re.MULTILINE)
+                actions = [line.strip() for line in action_lines if line.strip()]
+
             return {
                 'success': True,
                 'done': True,
                 'final_analysis': final_analysis,
-                'recommended_actions': actions
+                'recommended_actions': actions,
+                'raw_response': response  # Keep raw response for rejection handling
             }
-        
-        command_match = re.search(r'NEXT_COMMAND:\s*(.+?)(?:\n|$)', response)
-        explanation_match = re.search(r'EXPLANATION:\s*(.+?)(?:\n|$)', response)
-        
+
+        # Extract target host (new field)
+        target_match = re.search(r'TARGET_HOST:\s*(\S+)', response, re.IGNORECASE)
+        target_host = target_match.group(1).strip() if target_match else None
+
+        # Extract next command
+        command_match = re.search(r'NEXT_COMMAND:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
+        explanation_match = re.search(r'EXPLANATION:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
+
         if command_match:
             return {
                 'success': True,
                 'done': False,
+                'target_host': target_host,
                 'command': command_match.group(1).strip(),
                 'explanation': explanation_match.group(1).strip() if explanation_match else ''
             }
-        
-        self.audit.log('WARNING', 'Could not parse AI response')
+
+        # Try to extract command even without proper format (fallback)
+        self.audit.log('WARNING', 'Response not in expected format, attempting fallback parse',
+                      {'response_preview': response[:200]})
+
         return {
             'success': False,
-            'error': 'Could not parse AI response'
+            'error': 'Could not parse Ollama response',
+            'raw_response': response[:500]
         }

@@ -33,7 +33,7 @@ class InteractiveAIAnalyzer:
         self.model = api_config.get('model', 'qwen2.5-coder:3b')
         # Try multiple possible key names
         self.api_key = api_config.get('key') or api_config.get('api_key', '')
-        self.timeout = int(api_config.get('timeout', 300))
+        self.timeout = int(api_config.get('timeout', 600))
         self.verify_ssl = api_config.get('verify_ssl', 'false').lower() == 'true'
         
         # Minimum commands required before AI can conclude
@@ -192,6 +192,15 @@ ABSOLUTE RULES:
 8. For containers/VMs with issues, you may also check the hypervisor (hbpm01)
 9. For network equipment, NAS, or appliances, use the jumpserver (hbcsrv14)
 10. Consider checking related services (e.g., if MySQL disk is full, check the app servers using it)
+11. CRITICAL: Commands must be COMPLETE and EXECUTABLE - no placeholders like <container_id> or <path>
+12. CRITICAL: Do NOT use Markdown formatting (no backticks, bold, headers) in your response
+13. CRITICAL: Use PLAIN TEXT format only for your responses
+
+ALLOWED MYSQL COMMANDS (credentials will be auto-injected):
+- mysqladmin -u root -p status (use -p WITHOUT password - it will be injected automatically)
+- mysql -u root -p -e "SELECT ..." (use -p WITHOUT password)
+- NEVER write -p'password' or -pSOMETHING - just use -p alone
+- The system will automatically inject the correct password from credentials
 
 AVAILABLE DIAGNOSTIC APPROACHES:
 - Disk usage: du, find, ncdu, ls, df, lsof
@@ -268,10 +277,16 @@ Analyze the problem and suggest the next diagnostic command. You may:
 
 Use a COMPLETELY DIFFERENT APPROACH than the commands already executed.
 
-RESPONSE FORMAT (exactly as shown):
-TARGET_HOST: [hostname - must be from infrastructure list]
-NEXT_COMMAND: [single command, read-only only]
-EXPLANATION: [why this helps diagnose the issue]
+⚠️ CRITICAL FORMATTING RULES:
+- Use PLAIN TEXT only - NO Markdown (no **, no ```, no ###, no -)
+- Commands must be COMPLETE and EXECUTABLE - no placeholders or variables
+- If you need specific IDs or paths, first suggest a command to find them
+- Do NOT format your response with bold, code blocks, or headers
+
+RESPONSE FORMAT (plain text, exactly as shown):
+TARGET_HOST: hostname.internal.boehmecke.org
+NEXT_COMMAND: complete executable command with actual values
+EXPLANATION: why this helps diagnose the issue
 
 {'DO NOT use DIAGNOSIS_COMPLETE until you have executed at least ' + str(self.min_commands_required) + ' commands!' if num_executed < self.min_commands_required else 'You may now use DIAGNOSIS_COMPLETE if you have enough information:'}
 """
@@ -280,10 +295,10 @@ EXPLANATION: [why this helps diagnose the issue]
             current_prompt += """
 OR if you have enough information to conclude:
 DIAGNOSIS_COMPLETE: true
-FINAL_ANALYSIS: [your analysis of what's consuming space and why]
+FINAL_ANALYSIS: your analysis of what's consuming space and why
 RECOMMENDED_ACTIONS:
-1. [specific action with command if applicable]
-2. [another action]
+1. specific action with command if applicable
+2. another action
 """
 
         messages.append({
@@ -351,7 +366,20 @@ RECOMMENDED_ACTIONS:
             return None
 
     def _parse_interactive_response(self, response: str) -> Dict:
-        """Parse Ollama response with target host support"""
+        """Parse Ollama response with target host support - handles Markdown formatting and thinking tags"""
+
+        # Strip <think> blocks (some models output reasoning)
+        response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
+        response = response.strip()
+
+        # If response is empty after stripping, it was all thinking
+        if not response:
+            self.audit.log('WARNING', 'Response contained only <think> block, no actual answer')
+            return {
+                'success': False,
+                'error': 'AI only provided reasoning without answer',
+                'raw_response': response[:500]
+            }
 
         # Check if diagnosis is complete
         if re.search(r'DIAGNOSIS_COMPLETE:\s*true', response, re.IGNORECASE):
@@ -379,24 +407,53 @@ RECOMMENDED_ACTIONS:
                 'done': True,
                 'final_analysis': final_analysis,
                 'recommended_actions': actions,
-                'raw_response': response  # Keep raw response for rejection handling
+                'raw_response': response
             }
 
-        # Extract target host (new field)
-        target_match = re.search(r'TARGET_HOST:\s*(\S+)', response, re.IGNORECASE)
+        # Extract target host - handle Markdown formatting (###, **, etc.)
+        target_match = re.search(
+            r'TARGET[_\s]*HOST:\s*[*`#]*\s*(\S+)',
+            response,
+            re.IGNORECASE
+        )
         target_host = target_match.group(1).strip() if target_match else None
 
-        # Extract next command
-        command_match = re.search(r'NEXT_COMMAND:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
-        explanation_match = re.search(r'EXPLANATION:\s*(.+?)(?:\n|$)', response, re.IGNORECASE)
+        # Remove any trailing Markdown characters from hostname
+        if target_host:
+            target_host = target_host.rstrip('*`#_')
+
+        # Extract next command - handle backticks and bold markers
+        command_match = re.search(
+            r'NEXT[_\s]*COMMAND:\s*[*`]*\s*(.+?)(?:[*`]*\s*\n|[*`]*\s*$)',
+            response,
+            re.IGNORECASE
+        )
+
+        # Extract explanation - handle bold markers
+        explanation_match = re.search(
+            r'EXPLANATION:\s*[*-]*\s*(.+?)(?:\n\n|\n-|\n\*|$)',
+            response,
+            re.DOTALL | re.IGNORECASE
+        )
 
         if command_match:
+            command = command_match.group(1).strip()
+            # Clean up Markdown formatting from command
+            command = command.strip('`*_#')
+
+            explanation = ''
+            if explanation_match:
+                explanation = explanation_match.group(1).strip()
+                # Clean up Markdown list markers and bold
+                explanation = re.sub(r'^[*-]\s+', '', explanation)
+                explanation = re.sub(r'\*\*(.+?)\*\*', r'\1', explanation)
+
             return {
                 'success': True,
                 'done': False,
                 'target_host': target_host,
-                'command': command_match.group(1).strip(),
-                'explanation': explanation_match.group(1).strip() if explanation_match else ''
+                'command': command,
+                'explanation': explanation
             }
 
         # Try to extract command even without proper format (fallback)

@@ -313,8 +313,25 @@ def load_ai_config(config_file: str, credentials_file: str) -> Dict[str, str]:
     # Merge: add API key from credentials
     ai_config['key'] = creds['ollama_api']['key']
     
+    # Convert numeric strings to proper types for convenience
+    if 'timeout' in ai_config:
+        ai_config['timeout'] = int(ai_config['timeout'])
+    if 'min_commands_required' in ai_config:
+        ai_config['min_commands_required'] = int(ai_config['min_commands_required'])
+    if 'temperature' in ai_config:
+        ai_config['temperature'] = float(ai_config['temperature'])
+    if 'num_ctx' in ai_config:
+        ai_config['num_ctx'] = int(ai_config['num_ctx'])
+    if 'num_predict' in ai_config:
+        ai_config['num_predict'] = int(ai_config['num_predict'])
+    if 'top_p' in ai_config:
+        ai_config['top_p'] = float(ai_config['top_p'])
+    if 'top_k' in ai_config:
+        ai_config['top_k'] = int(ai_config['top_k'])
+    if 'repeat_penalty' in ai_config:
+        ai_config['repeat_penalty'] = float(ai_config['repeat_penalty'])
+    
     return ai_config
-
 
 class InteractiveDiagnostic:
     """Handles interactive diagnostic flow with AI"""

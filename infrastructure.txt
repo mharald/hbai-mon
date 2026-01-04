@@ -55,28 +55,10 @@ hblanmc.internal.boehmecke.org | nas | qnap | QNAP TS-251+ - primary storage
 hbvsrv03.internal.boehmecke.org | vm | ntp | NTP server
 hbvsrv15.internal.boehmecke.org | vm | home-assistant | Home automation (alias: hbhass.internal.boehmecke.org)
 
+#The following disk partitions can be ignored, as they are designed to be almost full.
+hblanmc:/mnt/ext
+hblanmc:/samba_third_party
+hblanmc:/new_root
+hblanmc:/share/CACHEDEV1_DATA/.qpkg/MediaSignPlayer/CodexPackExt/share
+hblanmc:/share/CACHEDEV1_DATA
 
-# SSH Port Forwarding Mapping
-# Format: hostname|short_name|forward_port|type
-
-hbpm01.internal.boehmecke.org|hbpm01|10001|hypervisor
-hbcsrv01.internal.boehmecke.org|hbcsrv01|10002|ctx
-hbcsrv02.internal.boehmecke.org|hbcsrv02|10003|ctx
-hbcsrv03.internal.boehmecke.org|hbcsrv03|10004|ctx
-hbcsrv04.internal.boehmecke.org|hbcsrv04|10005|ctx
-hbcsrv05.internal.boehmecke.org|hbcsrv05|10006|ctx
-hbcsrv06.internal.boehmecke.org|hbcsrv06|10007|ctx
-hbcsrv07.internal.boehmecke.org|hbcsrv07|10008|ctx
-hbcsrv10.internal.boehmecke.org|hbcsrv10|10009|ctx
-hbcsrv12.internal.boehmecke.org|hbcsrv12|10010|ctx
-hbcsrv13.internal.boehmecke.org|hbcsrv13|10011|ctx
-hbcsrv15.internal.boehmecke.org|hbcsrv15|10012|ctx
-hbcsrv16.internal.boehmecke.org|hbcsrv16|10013|ctx
-hbcsrv17.internal.boehmecke.org|hbcsrv17|10014|ctx
-hbcsrv08.internal.boehmecke.org|hbcsrv08|10015|ctx
-hbfwmgmt.internal.boehmecke.org|hbfwmgmt|10016|appliance
-hbsw03.internal.boehmecke.org|hbsw03|10017|switch
-hblan.internal.boehmecke.org|hblan|10018|nas
-hblanmc.internal.boehmecke.org|hblanmc|10019|nas
-hbvsrv03.internal.boehmecke.org|hbvsrv03|10020|vm
-hbvsrv15.internal.boehmecke.org|hbvsrv15|10021|vm

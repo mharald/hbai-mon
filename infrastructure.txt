@@ -52,13 +52,15 @@ hblan.internal.boehmecke.org | nas | qnap | QNAP TS-419P II (4x SATA) - backups 
 hblanmc.internal.boehmecke.org | nas | qnap | QNAP TS-251+ - primary storage
 
 # Virtual Machines
-hbvsrv03.internal.boehmecke.org | vm | ntp | NTP server
-hbvsrv15.internal.boehmecke.org | vm | home-assistant | Home automation (alias: hbhass.internal.boehmecke.org)
+hbvsrv03.internal.boehmecke.org | vm(qm) | ntp | NTP server
+hbvsrv15.internal.boehmecke.org | vm(qm) | home-assistant | Home automation (alias: hbhass.internal.boehmecke.org)
 
-#The following disk partitions can be ignored, as they are designed to be almost full.
+# The following disk partitions can be ignored, as they are designed to be almost full.
 hblanmc:/mnt/ext
 hblanmc:/samba_third_party
 hblanmc:/new_root
 hblanmc:/share/CACHEDEV1_DATA/.qpkg/MediaSignPlayer/CodexPackExt/share
 hblanmc:/share/CACHEDEV1_DATA
+
+# MySQL Databases and their owners (will do this later)
 

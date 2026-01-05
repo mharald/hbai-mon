@@ -52,24 +52,38 @@ class CommandExecutor:
             # Not a MySQL command
             return command
         
-        # Check if this looks like a placeholder password that needs replacement
-        # Patterns to replace: -p'password', -p"password", -ppassword, -pPASSWORD, -p
-        has_placeholder = re.search(r"-p\s*'?password'?", command, re.IGNORECASE)
-        has_interactive = re.search(r'-p\s*$', command) or re.search(r'-p\s+(-e|-B)', command)
+        self.audit.log('DEBUG', f'Detected MySQL command type: {cmd_type}')
+        
+        # Check various password patterns
+        # Pattern 1: -p'password' or -p"password" or -ppassword (placeholder)
+        has_placeholder = re.search(r"-p['\"]?password['\"]?", command, re.IGNORECASE)
+        
+        # Pattern 2: -p followed by space then non-password argument (interactive mode)
+        # This catches: -p status, -p -e, -p --verbose, etc.
+        has_interactive = re.search(r'-p\s+[^\'"\s]', command) and not re.search(r'-p\S', command)
+        
+        # Pattern 3: -p at end of command
+        has_p_at_end = re.search(r'-p\s*$', command)
+        
+        # Pattern 4: -p with nothing attached (standalone -p followed by space or end)
+        has_standalone_p = re.search(r'-p(?=\s|$)', command) and not re.search(r'-p\S', command)
+        
+        self.audit.log('DEBUG', f'Password detection: placeholder={has_placeholder}, interactive={has_interactive}, at_end={has_p_at_end}, standalone={has_standalone_p}')
         
         # Check if it already has a REAL password (not a placeholder)
-        # Real password would be -pSOMETHING where SOMETHING is not 'password'
-        has_real_password = re.search(r'-p[^\s\'"]', command) and not has_placeholder
+        # Real password: -pSOMETHING where SOMETHING is not 'password' and not whitespace
+        has_real_password = re.search(r'-p[^\s\'"]\S*', command) and not has_placeholder
         
         if has_real_password:
             self.audit.log('DEBUG', 'MySQL command already has real inline password')
             return command
         
-        if not (has_placeholder or has_interactive):
-            # Command doesn't need expansion
+        needs_expansion = has_placeholder or has_interactive or has_p_at_end or has_standalone_p
+        
+        if not needs_expansion:
+            self.audit.log('DEBUG', 'MySQL command does not need password expansion')
             return command
         
-        # Command needs password expansion
         self.audit.log('DEBUG', f'MySQL command needs credential expansion: {command[:50]}')
         
         # Determine which credentials to use based on hostname
@@ -94,25 +108,35 @@ class CommandExecutor:
         self.audit.log('DEBUG', f'Found credentials - user: {user}, password length: {len(password)}')
         
         # Remove ALL password-related flags and placeholders
-        # Remove: -p'password', -p"password", -ppassword, -pPASSWORD, -p (alone)
-        cleaned = re.sub(r"-p\s*'?\"?password'?\"?", '', command, flags=re.IGNORECASE)
-        cleaned = re.sub(r'-p\s*(?=\s|$)', '', cleaned)
-        cleaned = re.sub(r'-p[^\s]*\s*', '', cleaned)  # Remove any -pXXX
+        cleaned = command
+        # Remove -p'password', -p"password", -ppassword
+        cleaned = re.sub(r"-p['\"]?password['\"]?", '', cleaned, flags=re.IGNORECASE)
+        # Remove standalone -p (followed by space or end)
+        cleaned = re.sub(r'-p(?=\s|$)', '', cleaned)
+        # Remove any -pXXX that might remain
+        cleaned = re.sub(r'-p\S+', '', cleaned)
         
         # Remove existing -u flag (we'll add it back)
         cleaned = re.sub(r'-u\s+\S+\s*', '', cleaned)
         
+        # Clean up extra spaces
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+        
+        self.audit.log('DEBUG', f'Cleaned command: {cleaned}')
+        
         # Build new command: mysql -u USER -pPASSWORD <rest>
         # Insert credentials right after command name
         expanded = re.sub(
-            f'^{cmd_type}\\s+',
+            f'^{cmd_type}\\s*',
             f'{cmd_type} -u {user} -p{password} ',
             cleaned
         )
         
+        # Clean up any double spaces
+        expanded = re.sub(r'\s+', ' ', expanded).strip()
+        
         self.audit.log('INFO', f'MySQL command expanded successfully')
         self.audit.log('DEBUG', f'Original: {command[:80]}')
-        self.audit.log('DEBUG', f'Cleaned: {cleaned[:80]}')
         self.audit.log('DEBUG', f'Expanded: {cmd_type} -u {user} -p*** ...')
         
         return expanded

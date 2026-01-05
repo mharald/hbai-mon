@@ -338,7 +338,9 @@ RECOMMENDED_ACTIONS:
         try:
             self.audit.log('INFO', f'Sending request to Ollama ({len(messages)} messages)')
             self.audit.log('DEBUG', f'Request URL: {self.chat_endpoint}')
+            self.audit.log('DEBUG', f'Model: {self.model}, timeout: {self.timeout}s')
 
+            start_time = time.time()
             response = requests.post(
                 self.chat_endpoint,
                 json=payload,
@@ -346,6 +348,9 @@ RECOMMENDED_ACTIONS:
                 timeout=self.timeout,
                 verify=self.verify_ssl
             )
+            elapsed = time.time() - start_time
+
+            self.audit.log('DEBUG', f'Response received in {elapsed:.1f}s, status: {response.status_code}')
 
             if response.status_code != 200:
                 self.audit.log('ERROR', f'Ollama returned status {response.status_code}',
@@ -353,13 +358,36 @@ RECOMMENDED_ACTIONS:
                 return None
 
             data = response.json()
+
+            # Log raw response structure
+            self.audit.log('DEBUG', f'Response keys: {list(data.keys())}')
+
+            # Check for done/done_reason fields (indicates completion status)
+            if 'done' in data:
+                self.audit.log('DEBUG', f'Ollama done={data.get("done")}, done_reason={data.get("done_reason", "N/A")}')
+
             content = data.get('message', {}).get('content', '')
 
             self.audit.log('INFO', f'Received response ({len(content)} chars)')
+
+            # Log first and last 500 chars of raw response for debugging
+            self.audit.log('DEBUG', f'Response START: {content[:500]}')
+            if len(content) > 500:
+                self.audit.log('DEBUG', f'Response END: {content[-500:]}')
+
+            # Check if response appears truncated (ends mid-sentence or mid-tag)
+            if content.endswith('<') or content.endswith('<think') or content.endswith('<think>'):
+                self.audit.log('WARNING', 'Response appears truncated (ends with incomplete tag)')
+            elif not content.rstrip().endswith(('.', ':', '`', '"', "'", ')', ']', '}', '\n')):
+                self.audit.log('WARNING', f'Response may be truncated (ends with: ...{content[-20:]})')
+
             return content
 
         except requests.exceptions.Timeout:
             self.audit.log('ERROR', f'Ollama API timeout after {self.timeout}s')
+            return None
+        except requests.exceptions.ConnectionError as e:
+            self.audit.log('ERROR', f'Ollama connection error: {str(e)}')
             return None
         except Exception as e:
             self.audit.log('ERROR', f'Ollama API error: {str(e)}')
@@ -368,9 +396,40 @@ RECOMMENDED_ACTIONS:
     def _parse_interactive_response(self, response: str) -> Dict:
         """Parse Ollama response with target host support - handles Markdown formatting and thinking tags"""
 
-        # Strip <think> blocks (some models output reasoning)
+        # Log raw response for debugging
+        self.audit.log('DEBUG', f'Raw response length: {len(response)}')
+        self.audit.log('DEBUG', f'Raw response first 300 chars: {response[:300]}')
+
+        # Check for <think> tags before stripping
+        think_matches = list(re.finditer(r'<think>', response, re.IGNORECASE))
+        think_end_matches = list(re.finditer(r'</think>', response, re.IGNORECASE))
+        self.audit.log('DEBUG', f'Found {len(think_matches)} <think> tags, {len(think_end_matches)} </think> tags')
+
+        if think_matches:
+            for i, match in enumerate(think_matches):
+                self.audit.log('DEBUG', f'<think> tag {i+1} at position {match.start()}')
+        if think_end_matches:
+            for i, match in enumerate(think_end_matches):
+                self.audit.log('DEBUG', f'</think> tag {i+1} at position {match.start()}')
+
+        # Strip <think> blocks (some models output reasoning) - handle multiple and mid-line occurrences
+        original_len = len(response)
+
+        # First, remove complete <think>...</think> blocks
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
+
+        # Also handle unclosed <think> tags (thinking that continues to end of response)
+        response = re.sub(r'<think>.*$', '', response, flags=re.DOTALL | re.IGNORECASE)
+
+        # Clean up any leftover artifacts from mid-line think tags
+        response = re.sub(r'</?think[^>]*>', '', response, flags=re.IGNORECASE)
+
+        # Clean up extra whitespace and blank lines
+        response = re.sub(r'\n\s*\n', '\n', response)
         response = response.strip()
+
+        self.audit.log('DEBUG', f'After think-stripping: {original_len} -> {len(response)} chars')
+        self.audit.log('DEBUG', f'Stripped response: {response[:300] if response else "(empty)"}')
 
         # If response is empty after stripping, it was all thinking
         if not response:
@@ -422,12 +481,20 @@ RECOMMENDED_ACTIONS:
         if target_host:
             target_host = target_host.rstrip('*`#_')
 
-        # Extract next command - handle backticks and bold markers
+        # Extract next command - more flexible pattern to handle various formats
         command_match = re.search(
-            r'NEXT[_\s]*COMMAND:\s*[*`]*\s*(.+?)(?:[*`]*\s*\n|[*`]*\s*$)',
+            r'NEXT[_\s]*COMMAND:\s*[*`]*\s*(.+?)(?:[*`]*\s*(?:\n|$))',
             response,
-            re.IGNORECASE
+            re.IGNORECASE | re.DOTALL
         )
+
+        # If that didn't work, try multiline: NEXT_COMMAND:\n<command>
+        if not command_match or not command_match.group(1).strip():
+            command_match = re.search(
+                r'NEXT[_\s]*COMMAND:\s*\n\s*(.+?)(?:\n|$)',
+                response,
+                re.IGNORECASE
+            )
 
         # Extract explanation - handle bold markers
         explanation_match = re.search(
@@ -440,23 +507,26 @@ RECOMMENDED_ACTIONS:
             command = command_match.group(1).strip()
             # Clean up Markdown formatting from command
             command = command.strip('`*_#')
+            # Remove any newlines within the command
+            command = command.split('\n')[0].strip()
 
-            explanation = ''
-            if explanation_match:
-                explanation = explanation_match.group(1).strip()
-                # Clean up Markdown list markers and bold
-                explanation = re.sub(r'^[*-]\s+', '', explanation)
-                explanation = re.sub(r'\*\*(.+?)\*\*', r'\1', explanation)
+            if command:
+                explanation = ''
+                if explanation_match:
+                    explanation = explanation_match.group(1).strip()
+                    explanation = re.sub(r'^[*-]\s+', '', explanation)
+                    explanation = re.sub(r'\*\*(.+?)\*\*', r'\1', explanation)
 
-            return {
-                'success': True,
-                'done': False,
-                'target_host': target_host,
-                'command': command,
-                'explanation': explanation
-            }
+                self.audit.log('DEBUG', f'Parsed successfully: target={target_host}, command={command[:50]}')
+                return {
+                    'success': True,
+                    'done': False,
+                    'target_host': target_host,
+                    'command': command,
+                    'explanation': explanation
+                }
 
-        # Try to extract command even without proper format (fallback)
+        # Fallback parse failed
         self.audit.log('WARNING', 'Response not in expected format, attempting fallback parse',
                       {'response_preview': response[:200]})
 

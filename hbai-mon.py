@@ -345,7 +345,7 @@ class InteractiveDiagnostic:
 
         # Initialize command executor
         ssh_creds = dict(self.db.credentials['ssh_default'])
-        self.executor = CommandExecutor(ssh_creds, audit_logger)
+        self.executor = CommandExecutor(ssh_creds, audit_logger, CREDENTIALS_FILE)
 
         # Load infrastructure info
         self.infra = InfrastructureInfo(INFRASTRUCTURE_FILE)

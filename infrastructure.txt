@@ -1,66 +1,191 @@
-# Home Boehmecke Infrastructure
-# Format: hostname | type | role | notes
+# ============================================================================
+# Home Boehmecke Infrastructure - AI Reference Document
+# ============================================================================
+# This file provides context for automated diagnostics. Keep it updated.
+# Last updated: 2026-01-04
+# ============================================================================
+
+# ============================================================================
+# NETWORK TOPOLOGY
+# ============================================================================
+# Three VRFs with distinct security zones:
+#
+# VRF vs001 (Internet):
+#   VLAN 2  | Untrust           | WAN/Internet facing
+#
+# VRF vs002 (DMZ):
+#   VLAN 11 | Nachbar           | 192.168.170.0/29  | Neighbor network
+#   VLAN 12 | DMZ               | 192.168.255.80/28 | DMZ servers
+#   VLAN 13 | Transfer          | 192.168.255.64/28 | Inter-VRF routing
+#   VLAN 18 | Guest-WLAN        | 192.168.255.96/28 | Guest wireless
+#
+# VRF vs003 (Backend/Trust):
+#   VLAN 3  | Server            | 192.168.0.160/27, 192.168.179.0/24 | Production servers
+#   VLAN 4  | WLAN Clients      | 192.168.188.0/24  | Wireless clients
+#   VLAN 5  | Gaming            | 192.168.181.0/28  | Gaming devices
+#   VLAN 6  | Cameras           | 192.168.189.0/27  | Security cameras
+#   VLAN 7  | FW Management     | 192.168.175.0/29  | Firewall management
+#   VLAN 8  | Multimedia        | 192.168.179.0/24  | Media devices
+#   VLAN 10 | SW Management     | 192.168.175.8/29  | Switch management
+#   VLAN 14 | AP Management     | 192.168.175.16/29 | Access point management
+#   VLAN 15 | Admin             | 192.168.190.0/29  | Administrative access
+#   VLAN 16 | Home              | 192.168.190.128/25| Home automation
+#   VLAN 17 | Work              | 192.168.190.32/28 | Work devices
+#
+# Management access: All hosts reachable via jumpserver hbcsrv14 (VLAN 15)
+
+# ============================================================================
+# HOSTS
+# ============================================================================
+# Format: hostname | type | vlan | role | description
 #
 # Types:
 #   hypervisor = Proxmox physical host
-#   ctx        = LXC container (on Proxmox hbpm01)
-#   vm         = Virtual machine (on Proxmox hbpm01)
-#   appliance  = Network appliance (firewall, etc.)
+#   ctx        = LXC container (on hbpm01)
+#   vm         = QEMU VM (on hbpm01)
+#   appliance  = Network appliance
 #   switch     = Network switch
 #   nas        = Network attached storage
+
+# --- Hypervisor ---
+hbpm01.internal.boehmecke.org | hypervisor | 3 | proxmox | Primary Proxmox host, all VMs/containers, local LVM storage (lvm_m2_2tb)
+
+# --- Administrative ---
+hbcsrv14.internal.boehmecke.org | ctx | 15 | jumpserver | Gateway for all SSH access, required for NAS/switches/appliances
+
+# --- DNS & DHCP ---
+hbcsrv01.internal.boehmecke.org | ctx | 3 | dns-primary | BIND primary DNS
+hbcsrv02.internal.boehmecke.org | ctx | 3 | dns-secondary | BIND secondary DNS
+hbcsrv03.internal.boehmecke.org | ctx | 3 | dhcp-primary | ISC DHCP primary
+hbcsrv04.internal.boehmecke.org | ctx | 3 | dhcp-secondary | ISC DHCP secondary
+
+# --- Authentication ---
+hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority
+
+# --- Web & Applications ---
+hbcsrv06.internal.boehmecke.org | ctx | 3 | webserver | Apache reverse proxy, legacy Docker host (migrating to hbcsrv16)
+hbcsrv07.internal.boehmecke.org | ctx | 3 | wlan-controller | TP-Link Omada controller
+hbcsrv08.internal.boehmecke.org | ctx | 3 | mediaserver | Jellyfin, mounts NFS from hblanmc (videos, series, fotos)
+
+# --- Databases ---
+hbcsrv12.internal.boehmecke.org | ctx | 3 | mysql | Central MySQL server for all applications
+
+# --- Monitoring & Logging ---
+hbcsrv13.internal.boehmecke.org | ctx | 3 | monitoring | Observium + Syslog receiver (disk fills quickly from logs)
+
+# --- Docker Infrastructure ---
+hbcsrv15.internal.boehmecke.org | ctx | 3 | elasticsearch | ElasticSearch + Apache Tika
+hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale; manages agents on other hosts
+
+# --- Other ---
+hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz | DMZ Linux server (isolated network)
+hbcsrv17.internal.boehmecke.org | ctx | 3 | cron | Scheduled tasks server (currently idle, no active jobs)
+
+# --- Virtual Machines ---
+hbvsrv03.internal.boehmecke.org | vm | 3 | ntp | NTP server for infrastructure
+hbvsrv15.internal.boehmecke.org | vm | 16 | homeassistant | Home Assistant (alias: hbhass), disk fills from database/logs
+
+# --- Network Equipment (access via hbcsrv14) ---
+hbfwmgmt.internal.boehmecke.org | appliance | 7 | firewall | FortiGate 50E, main firewall
+hbsw03.internal.boehmecke.org | switch | 10 | switch | Alcatel managed switch
+
+# --- Storage (access via hbcsrv14, often powered off) ---
+hblan.internal.boehmecke.org | nas | 3 | backup-nas | QNAP TS-419P II, backup target for Proxmox and hblanmc
+hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary storage, NFS exports for filerun/media
+
+# ============================================================================
+# PROXMOX VM/CONTAINER IDs
+# ============================================================================
+# Use with: pct exec <ID> -- <command>  (containers)
+#           qm guest exec <ID> -- <command>  (VMs with qemu-guest-agent)
 #
-# All hosts are DNS-reachable via .internal.boehmecke.org domain
-# Network equipment, NAS, and appliances: access via jumpserver hbcsrv14 (ProxyJump)
+# Containers (pct):
+#   100=hbcsrv01  102=hbcsrv13  103=hbcsrv02  104=hbcsrv12
+#   106=hbcsrv07  108=hbcsrv14  109=hbcsrv06  110=hbcsrv08
+#   113=hbcsrv15  115=hbcsrv16  116=hbcsrv17  119=hbcsrv03
+#   120=hbcsrv04  121=hbcsrv05  122=hbcsrv10
 #
-# Proxmox VMIDs for reference:
-#   Containers (pct): 100=hbcsrv01, 102=hbcsrv13, 103=hbcsrv02, 104=hbcsrv12,
-#                     106=hbcsrv07, 108=hbcsrv14, 109=hbcsrv06, 110=hbcsrv08,
-#                     113=hbcsrv15, 115=hbcsrv16, 116=hbcsrv17, 119=hbcsrv03,
-#                     120=hbcsrv04, 121=hbcsrv05, 122=hbcsrv10
-#   VMs (qm): 114=hbvsrv03, 117=hbvsrv15
+# VMs (qm):
+#   114=hbvsrv03  117=hbvsrv15
 
-# Proxmox Hypervisor
-hbpm01.internal.boehmecke.org | hypervisor | proxmox | Primary hypervisor - hosts all VMs and containers
+# ============================================================================
+# MYSQL DATABASES
+# ============================================================================
+# Format: database | host | client | description
+#
+filerun_new   | hbcsrv12 | hbcsrv06  | FileRun file hosting (reverse proxy on hbcsrv06)
+hbai          | hbcsrv12 | hbcsrv13  | HBAI-MON diagnostic system
+homeassistant | hbcsrv12 | hbvsrv15  | Home Assistant database
+my_wiki       | hbcsrv12 | hbcsrv06  | Wiki application
+observium2023 | hbcsrv12 | hbcsrv13  | Observium monitoring (syslog disabled)
+phpipam       | hbcsrv12 | hbcsrv06  | IP Address Management
+quicklinks    | hbcsrv12 | hbcsrv06  | Quick links web tool
+radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database
+syslog        | hbcsrv12 | hbcsrv13  | Centralized syslog storage
+wordpress     | hbcsrv12 | hbcsrv06  | WordPress site
 
-# Administrative
-hbcsrv14.internal.boehmecke.org | ctx | jumpserver | Administrative jumpserver - gateway for network equipment, NAS, appliances
+# ============================================================================
+# DOCKER CONTAINERS
+# ============================================================================
+# Format: container | host | notes
+#
+# On hbcsrv06 (legacy, migrating away):
+open-webui      | hbcsrv06 | AI chat interface
+filerun         | hbcsrv06 | File hosting frontend
+portainer-agent | hbcsrv06 | Managed by Portainer on hbcsrv16
+#
+# On hbcsrv16 (primary Docker host):
+portainer-ce    | hbcsrv16 | Docker management UI (master)
+radicale        | hbcsrv16 | CalDAV/CardDAV server
 
-# Core Services
-hbcsrv01.internal.boehmecke.org | ctx | bind-primary | Primary DNS server
-hbcsrv02.internal.boehmecke.org | ctx | bind-secondary | Secondary DNS server
-hbcsrv03.internal.boehmecke.org | ctx | dhcp-primary | Primary DHCP server
-hbcsrv04.internal.boehmecke.org | ctx | dhcp-secondary | Secondary DHCP server
-hbcsrv05.internal.boehmecke.org | ctx | freeradius-ca | FreeRADIUS + Certificate Authority
-hbcsrv06.internal.boehmecke.org | ctx | webserver | Docker host: open-webui, filerun, portainer-agent
-hbcsrv07.internal.boehmecke.org | ctx | wlan-controller | Omada WLAN Controller
-hbcsrv10.internal.boehmecke.org | ctx | dmz-server | DMZ Linux server
-hbcsrv12.internal.boehmecke.org | ctx | mysql-server | MySQL database server
-hbcsrv13.internal.boehmecke.org | ctx | monitoring | Observium monitoring server
-hbcsrv15.internal.boehmecke.org | ctx | elasticsearch-tika | ElasticSearch and Apache TIKA
-hbcsrv16.internal.boehmecke.org | ctx | portainer | Docker host: portainer-ce, radicale
-hbcsrv17.internal.boehmecke.org | ctx | cron-tasks | Remote cron/scheduled tasks server
+# ============================================================================
+# NFS MOUNTS
+# ============================================================================
+# Format: client | server | export | purpose
+#
+hbcsrv06 | hblanmc | nfs-documentos      | FileRun document storage
+hbcsrv08 | hblanmc | nfs-videos          | Jellyfin video library
+hbcsrv08 | hblanmc | nfs-series          | Jellyfin TV series
+hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 
-# Media & Applications
-hbcsrv08.internal.boehmecke.org | ctx | jellyfin | Media server (Jellyfin)
+# ============================================================================
+# BACKUP RELATIONSHIPS
+# ============================================================================
+# Proxmox (hbpm01) backs up all VMs/containers to hblan (CIFS: HBLAN-BACKUP)
+# hblanmc syncs critical data to hblan
+# Note: NAS devices are often powered off to save energy
 
-# Network Equipment (access via hbcsrv14 ProxyJump)
-hbfwmgmt.internal.boehmecke.org | appliance | fortigate | FortiGate 50E firewall
-hbsw03.internal.boehmecke.org | switch | alcatel | Alcatel switch 03
+# ============================================================================
+# COMMON DISK SPACE ISSUES
+# ============================================================================
+# These hosts/paths frequently fill up:
+#
+# hbcsrv13 (monitoring):
+#   - /var/log: Syslog from all devices
+#   - MySQL syslog database grows quickly
+#   - Check: journalctl --disk-usage, du -sh /var/log/*
+#
+# hbvsrv15 (homeassistant):
+#   - Home Assistant database (history/statistics)
+#   - Check: du -sh /home/homeassistant/.homeassistant/*.db
+#
+# hbcsrv12 (mysql):
+#   - Binary logs, slow query logs
+#   - Large databases: syslog, observium2023, homeassistant
+#   - Check: du -sh /var/lib/mysql/*, SHOW BINARY LOGS
+#
+# hbpm01 (proxmox):
+#   - Old backup files if HBLAN was unavailable
+#   - Container/VM images
+#   - Check: du -sh /var/lib/vz/*, pvesm status
 
-# Storage (access via hbcsrv14 ProxyJump)
-hblan.internal.boehmecke.org | nas | qnap | QNAP TS-419P II (4x SATA) - backups only
-hblanmc.internal.boehmecke.org | nas | qnap | QNAP TS-251+ - primary storage
-
-# Virtual Machines
-hbvsrv03.internal.boehmecke.org | vm(qm) | ntp | NTP server
-hbvsrv15.internal.boehmecke.org | vm(qm) | home-assistant | Home automation (alias: hbhass.internal.boehmecke.org)
-
-# The following disk partitions can be ignored, as they are designed to be almost full.
+# ============================================================================
+# IGNORED DISK ALERTS
+# ============================================================================
+# These mounts are designed to be nearly full, ignore alerts:
+#
 hblanmc:/mnt/ext
 hblanmc:/samba_third_party
 hblanmc:/new_root
 hblanmc:/share/CACHEDEV1_DATA/.qpkg/MediaSignPlayer/CodexPackExt/share
 hblanmc:/share/CACHEDEV1_DATA
-
-# MySQL Databases and their owners (will do this later)
-

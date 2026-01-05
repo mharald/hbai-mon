@@ -1,1 +1,3 @@
 audit.log
+.credentials
+__pycache__/*

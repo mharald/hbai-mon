@@ -20,6 +20,19 @@ CONFIG_DIR = "/etc/hbai-mon"
 INFRASTRUCTURE_FILE = f"{CONFIG_DIR}/infrastructure.txt"
 
 
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
 class InteractiveAIAnalyzer:
     """Interactive AI analyzer using Ollama's native chat API"""
 
@@ -39,6 +52,14 @@ class InteractiveAIAnalyzer:
         # Minimum commands required before AI can conclude
         self.min_commands_required = int(api_config.get('min_commands_required', 10))
         
+        # Model parameters from config
+        self.temperature = float(api_config.get('temperature', 0.7))
+        self.num_ctx = int(api_config.get('num_ctx', 16384))
+        self.num_predict = int(api_config.get('num_predict', 4096))
+        self.top_p = float(api_config.get('top_p', 0.9))
+        self.top_k = int(api_config.get('top_k', 40))
+        self.repeat_penalty = float(api_config.get('repeat_penalty', 1.3))
+        
         self.audit = audit_logger
 
         # Ollama native chat endpoint
@@ -54,7 +75,7 @@ class InteractiveAIAnalyzer:
         self.audit.log('INFO', f'API key length: {len(self.api_key) if self.api_key else 0}')
         if self.api_key:
             self.audit.log('INFO', f'API key prefix: {self.api_key[:10]}...')
-        self.audit.log('INFO', f'Infrastructure loaded: {len(self.infrastructure)} hosts')
+        self.audit.log('INFO', f'Infrastructure loaded: {len(self.infrastructure)} chars')
 
     def _load_infrastructure(self) -> str:
         """Load infrastructure description from file"""
@@ -128,7 +149,7 @@ class InteractiveAIAnalyzer:
                     })
                     messages.append({
                         "role": "user",
-                        "content": f"❌ REJECTED: You must execute at least {self.min_commands_required} diagnostic commands before concluding.\n\n" +
+                        "content": f"REJECTED: You must execute at least {self.min_commands_required} diagnostic commands before concluding.\n\n" +
                                   f"So far you have only executed {num_executed} commands.\n\n" +
                                   f"You need to run {self.min_commands_required - num_executed} more commands.\n\n" +
                                   f"Continue with the next diagnostic command using a different approach."
@@ -154,7 +175,7 @@ class InteractiveAIAnalyzer:
             })
             messages.append({
                 "role": "user",
-                "content": f"❌ REJECTED: That command is too similar to already executed commands.\n\n" +
+                "content": f"REJECTED: That command is too similar to already executed commands.\n\n" +
                           f"Already executed:\n" +
                           '\n'.join(f"- {cmd}" for cmd in executed_commands) +
                           f"\n\nYour suggestion '{new_command}' is basically the same.\n\n" +
@@ -181,50 +202,97 @@ class InteractiveAIAnalyzer:
 INFRASTRUCTURE OVERVIEW:
 {self.infrastructure}
 
-ABSOLUTE RULES:
-1. You MUST execute at least {self.min_commands_required} diagnostic commands before you can conclude
-2. NEVER repeat a command that has already been executed
-3. NEVER suggest minor variations (like changing head -20 to head -10)
-4. Suggest COMPLETELY DIFFERENT approaches
-5. All commands must be READ-ONLY (no rm, delete, truncate, write operations)
-6. Permission errors on 'lost+found' are NORMAL - ignore them
-7. You can run commands on ANY host in the infrastructure - specify TARGET_HOST
-8. For containers/VMs with issues, you may also check the hypervisor (hbpm01)
-9. For network equipment, NAS, or appliances, use the jumpserver (hbcsrv14)
-10. Consider checking related services (e.g., if MySQL disk is full, check the app servers using it)
-11. CRITICAL: Commands must be COMPLETE and EXECUTABLE - no placeholders like <container_id> or <path>
-12. CRITICAL: Do NOT use Markdown formatting (no backticks, bold, headers) in your response
-13. CRITICAL: Use PLAIN TEXT format only for your responses
+RESPONSE RULES:
+1. Suggest exactly ONE command per response - no more, no less
+2. Wait for the command output before suggesting the next command
+3. You will receive the history of all previously executed commands and their outputs
+4. You MUST execute at least {self.min_commands_required} diagnostic commands before concluding
+5. If more commands are needed after {self.min_commands_required}, continue until you have enough information
+6. NEVER repeat a command that has already been executed
+7. NEVER suggest minor variations of previous commands (e.g., changing head -20 to head -10)
+8. Each command should explore a DIFFERENT diagnostic angle
 
-ALLOWED MYSQL COMMANDS (credentials will be auto-injected):
-- mysqladmin -u root -p status (use -p WITHOUT password - it will be injected automatically)
-- mysql -u root -p -e "SELECT ..." (use -p WITHOUT password)
-- NEVER write -p'password' or -pSOMETHING - just use -p alone
-- The system will automatically inject the correct password from credentials
+COMMAND REQUIREMENTS:
+1. All commands must be READ-ONLY (no rm, delete, truncate, write operations)
+2. Commands must be COMPLETE and EXECUTABLE - no placeholders like <container_id> or <path>
+3. If you need specific IDs or paths, first suggest a command to discover them
+4. Permission errors on 'lost+found' directories are NORMAL - ignore them
+5. You may use backticks (`) in MySQL queries for column/table identifiers - they will be escaped automatically
 
-AVAILABLE DIAGNOSTIC APPROACHES:
-- Disk usage: du, find, ncdu, ls, df, lsof
-- Process analysis: ps, top, lsof, /proc
-- Log analysis: journalctl, /var/log/*, dmesg
+MULTI-HOST DIAGNOSIS:
+1. You can run commands on ANY host in the infrastructure - specify TARGET_HOST
+2. For containers/VMs with issues, also consider checking the hypervisor (hbpm01)
+3. For network equipment, NAS, or appliances, access via jumpserver (hbcsrv14)
+4. Consider checking related services (e.g., if MySQL disk is full, check which apps use that database)
+
+MYSQL COMMANDS:
+- Use -p WITHOUT a password value - credentials are auto-injected
+- Correct: mysql -u root -p -e "SELECT ..."
+- Correct: mysqladmin -u root -p status
+- WRONG: mysql -u root -p'password' -e "..."
+- You CAN use backticks for MySQL identifiers (they are escaped automatically)
+- Example: SELECT table_schema AS `Database`, SUM(data_length) AS `Size` FROM information_schema.tables
+
+DIAGNOSTIC GOAL:
+Your goal is to find ROOT CAUSES and propose LONG-TERM SOLUTIONS, not quick patches.
+
+For example, if a MySQL partition is full:
+- Identify WHICH database is consuming the most space
+- Determine WHY it is growing (logs, old data, lack of retention policy)
+- Propose HOUSEKEEPING solutions (log rotation, data archival, retention policies, scheduled cleanup jobs)
+- Do NOT just suggest deleting files as a one-time fix
+
+AVAILABLE DIAGNOSTIC TOOLS:
+- Disk: du, find, ncdu, ls, df, lsof
+- Processes: ps, top, lsof, /proc
+- Logs: journalctl, /var/log/*, dmesg
 - Docker: docker ps, docker stats, docker system df
 - Proxmox (on hbpm01): pct exec, pvesm, zfs list, lvs
-- Service status: systemctl, service
+- Services: systemctl, service
 - Network: ss, netstat, ip
-- Filesystem: mount, findmnt, tune2fs, xfs_info"""
+- Filesystem: mount, findmnt, tune2fs, xfs_info
+- MySQL: SHOW BINARY LOGS, SHOW VARIABLES, information_schema queries
+
+OUTPUT FORMAT:
+Use PLAIN TEXT only - no Markdown (no **, no ```, no ###, no bullet points)
+
+For each diagnostic step, respond with exactly:
+TARGET_HOST: hostname.internal.boehmecke.org
+NEXT_COMMAND: complete executable command
+EXPLANATION: brief reason why this helps
+
+When you have gathered enough information (minimum {self.min_commands_required} commands), respond with:
+DIAGNOSIS_COMPLETE: true
+ROOT_CAUSE: what is causing the problem and why
+LONG_TERM_SOLUTION: permanent fix with implementation steps
+IMMEDIATE_ACTIONS: if urgent, what to do right now
+PREVENTIVE_MEASURES: how to prevent this in the future
+COMMANDS_TO_IMPLEMENT: specific commands to implement the solution (numbered list)"""
 
         messages.append({
             "role": "system",
             "content": system_content
         })
 
-        # Track executed commands with their targets
+        # Track executed commands with their targets and outputs
         executed_cmds = []
 
         # Add conversation history as proper message pairs
         for item in history:
             if item.get('executed'):
                 target = item.get('target_host', context['hostname'])
-                executed_cmds.append(f"{target}: {item['command']}")
+                cmd_summary = f"{target}: {item['command']}"
+                
+                # Include truncated output in the summary
+                output = item.get('stdout', '')
+                if len(output) > 1000:
+                    output = output[:1000] + "\n... (truncated)"
+                
+                executed_cmds.append({
+                    'summary': cmd_summary,
+                    'output': output,
+                    'success': item.get('success', False)
+                })
 
                 # User executed command
                 messages.append({
@@ -248,15 +316,22 @@ AVAILABLE DIAGNOSTIC APPROACHES:
         # Build current prompt
         current_prompt = f"""
 {'='*80}
-⚠️  COMMANDS ALREADY EXECUTED - DO NOT REPEAT OR VARY THESE:
+PREVIOUSLY EXECUTED COMMANDS AND RESULTS:
 {'='*80}
 """
 
         if executed_cmds:
-            for i, cmd in enumerate(executed_cmds, 1):
-                current_prompt += f"❌ {i}. {cmd}\n"
+            for i, cmd_info in enumerate(executed_cmds, 1):
+                status = "OK" if cmd_info['success'] else "FAILED"
+                current_prompt += f"\n{i}. [{status}] {cmd_info['summary']}\n"
+                if cmd_info['output']:
+                    # Indent output for readability
+                    indented_output = '\n'.join(f"   {line}" for line in cmd_info['output'].split('\n')[:20])
+                    current_prompt += f"{indented_output}\n"
+                    if len(cmd_info['output'].split('\n')) > 20:
+                        current_prompt += "   ... (output truncated)\n"
         else:
-            current_prompt += "✓ No commands executed yet\n"
+            current_prompt += "No commands executed yet.\n"
 
         current_prompt += f"""
 {'='*80}
@@ -270,35 +345,30 @@ CURRENT PROBLEM:
 - Free Space: {context['free_gb']}GB
 
 YOUR TASK:
-Analyze the problem and suggest the next diagnostic command. You may:
-1. Run a command on the alerting host ({context['hostname']})
-2. Run a command on the hypervisor (hbpm01) to check container/VM level
-3. Run a command on a related host (e.g., check what's writing to this server)
+Analyze the information gathered so far and suggest the NEXT SINGLE diagnostic command.
+Focus on finding the ROOT CAUSE, not just symptoms.
+Think about what LONG-TERM SOLUTION would prevent this problem from recurring.
 
-Use a COMPLETELY DIFFERENT APPROACH than the commands already executed.
+Remember:
+- Suggest exactly ONE command
+- Use a DIFFERENT approach than previous commands
+- {"You need " + str(self.min_commands_required - num_executed) + " more commands before you can conclude" if num_executed < self.min_commands_required else "You may conclude if you have enough information, or continue investigating"}
 
-⚠️ CRITICAL FORMATTING RULES:
-- Use PLAIN TEXT only - NO Markdown (no **, no ```, no ###, no -)
-- Commands must be COMPLETE and EXECUTABLE - no placeholders or variables
-- If you need specific IDs or paths, first suggest a command to find them
-- Do NOT format your response with bold, code blocks, or headers
-
-RESPONSE FORMAT (plain text, exactly as shown):
+RESPOND WITH:
 TARGET_HOST: hostname.internal.boehmecke.org
-NEXT_COMMAND: complete executable command with actual values
-EXPLANATION: why this helps diagnose the issue
-
-{'DO NOT use DIAGNOSIS_COMPLETE until you have executed at least ' + str(self.min_commands_required) + ' commands!' if num_executed < self.min_commands_required else 'You may now use DIAGNOSIS_COMPLETE if you have enough information:'}
+NEXT_COMMAND: single complete executable command
+EXPLANATION: why this command helps find the root cause
 """
 
         if num_executed >= self.min_commands_required:
             current_prompt += """
-OR if you have enough information to conclude:
+OR if you have identified the root cause:
 DIAGNOSIS_COMPLETE: true
-FINAL_ANALYSIS: your analysis of what's consuming space and why
-RECOMMENDED_ACTIONS:
-1. specific action with command if applicable
-2. another action
+ROOT_CAUSE: what is causing the problem and why it happened
+LONG_TERM_SOLUTION: permanent fix with specific implementation steps
+IMMEDIATE_ACTIONS: urgent steps if disk is critically full (optional)
+PREVENTIVE_MEASURES: how to prevent recurrence (monitoring, alerts, automation)
+COMMANDS_TO_IMPLEMENT: numbered list of commands to implement the solution
 """
 
         messages.append({
@@ -309,18 +379,19 @@ RECOMMENDED_ACTIONS:
         return messages
 
     def _send_to_ollama(self, messages: List[Dict]) -> Optional[str]:
-        """Send to Ollama's native chat API"""
+        """Send to Ollama's native chat API with streaming for real-time feedback"""
 
         payload = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": True,  # Enable streaming
             "options": {
-                "temperature": 0.7,
-                "num_ctx": 16384,
-                "num_predict": 1024,
-                "top_p": 0.9,
-                "repeat_penalty": 1.3
+                "temperature": self.temperature,
+                "num_ctx": self.num_ctx,
+                "num_predict": self.num_predict,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "repeat_penalty": self.repeat_penalty
             }
         }
 
@@ -328,12 +399,8 @@ RECOMMENDED_ACTIONS:
             "Content-Type": "application/json"
         }
 
-        # Add Authorization header only if API key is present
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-            self.audit.log('DEBUG', 'Using API key for authentication')
-        else:
-            self.audit.log('WARNING', 'No API key configured - request may fail')
 
         try:
             self.audit.log('INFO', f'Sending request to Ollama ({len(messages)} messages)')
@@ -341,55 +408,125 @@ RECOMMENDED_ACTIONS:
             self.audit.log('DEBUG', f'Model: {self.model}, timeout: {self.timeout}s')
 
             start_time = time.time()
-            response = requests.post(
+            
+            # Status tracking
+            in_think_block = False
+            think_started = False
+            answer_started = False
+            token_count = 0
+            last_status_update = start_time
+            status_update_interval = 5  # Update elapsed time every 5 seconds
+            
+            full_response = ""
+            
+            # Print initial status
+            print(f"\n{Colors.OKCYAN}[...] Waiting for AI response...{Colors.ENDC}", end='', flush=True)
+
+            with requests.post(
                 self.chat_endpoint,
                 json=payload,
                 headers=headers,
                 timeout=self.timeout,
-                verify=self.verify_ssl
-            )
-            elapsed = time.time() - start_time
+                verify=self.verify_ssl,
+                stream=True
+            ) as response:
+                
+                if response.status_code != 200:
+                    self.audit.log('ERROR', f'Ollama returned status {response.status_code}',
+                                 {'response': response.text[:500]})
+                    print(f"\n{Colors.FAIL}[X] API error: {response.status_code}{Colors.ENDC}")
+                    return None
 
-            self.audit.log('DEBUG', f'Response received in {elapsed:.1f}s, status: {response.status_code}')
+                for line in response.iter_lines():
+                    if not line:
+                        continue
+                    
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    
+                    # Extract token content
+                    content = data.get('message', {}).get('content', '')
+                    if content:
+                        full_response += content
+                        token_count += 1  # Approximate: 1 chunk = 1 token
+                        
+                        # Check for <think> tag start
+                        if '<think>' in content.lower() and not think_started:
+                            think_started = True
+                            in_think_block = True
+                            elapsed = time.time() - start_time
+                            print(f"\r{Colors.WARNING}[THINK] AI is reasoning... [{elapsed:.0f}s, ~{token_count} tokens]{Colors.ENDC}      ", end='', flush=True)
+                            self.audit.log('DEBUG', f'AI started thinking at {elapsed:.1f}s')
+                        
+                        # Check for </think> tag end
+                        elif '</think>' in content.lower() and in_think_block:
+                            in_think_block = False
+                            answer_started = True
+                            elapsed = time.time() - start_time
+                            print(f"\r{Colors.OKGREEN}[DONE] Thinking complete, generating answer... [{elapsed:.0f}s, ~{token_count} tokens]{Colors.ENDC}      ", end='', flush=True)
+                            self.audit.log('DEBUG', f'AI finished thinking at {elapsed:.1f}s, ~{token_count} tokens used for thinking')
+                        
+                        # Periodic status update while thinking
+                        elif in_think_block:
+                            current_time = time.time()
+                            if current_time - last_status_update >= status_update_interval:
+                                elapsed = current_time - start_time
+                                print(f"\r{Colors.WARNING}[THINK] AI is reasoning... [{elapsed:.0f}s, ~{token_count} tokens]{Colors.ENDC}      ", end='', flush=True)
+                                last_status_update = current_time
+                        
+                        # Status update while answering
+                        elif answer_started or not think_started:
+                            current_time = time.time()
+                            if current_time - last_status_update >= status_update_interval:
+                                elapsed = current_time - start_time
+                                status_msg = "generating answer" if answer_started else "processing"
+                                print(f"\r{Colors.OKCYAN}[GEN] AI is {status_msg}... [{elapsed:.0f}s, ~{token_count} tokens]{Colors.ENDC}      ", end='', flush=True)
+                                last_status_update = current_time
+                    
+                    # Check if done
+                    if data.get('done', False):
+                        elapsed = time.time() - start_time
+                        done_reason = data.get('done_reason', 'complete')
+                        
+                        # Get actual token counts from final response
+                        eval_count = data.get('eval_count', token_count)
+                        prompt_eval_count = data.get('prompt_eval_count', 0)
+                        
+                        print(f"\r{Colors.OKGREEN}[OK] Response complete [{elapsed:.1f}s, {eval_count} out / {prompt_eval_count} prompt tokens]{Colors.ENDC}      ")
+                        
+                        self.audit.log('INFO', f'Response complete in {elapsed:.1f}s', {
+                            'done_reason': done_reason,
+                            'output_tokens': eval_count,
+                            'prompt_tokens': prompt_eval_count,
+                            'total_chars': len(full_response)
+                        })
+                        
+                        if done_reason == 'length':
+                            print(f"{Colors.WARNING}[!] Response may be truncated (hit token limit){Colors.ENDC}")
+                            self.audit.log('WARNING', 'Response truncated due to token limit')
+                        
+                        break
 
-            if response.status_code != 200:
-                self.audit.log('ERROR', f'Ollama returned status {response.status_code}',
-                             {'response': response.text[:500]})
-                return None
+            # Final logging
+            self.audit.log('DEBUG', f'Response START: {full_response[:500]}')
+            if len(full_response) > 500:
+                self.audit.log('DEBUG', f'Response END: {full_response[-500:]}')
 
-            data = response.json()
-
-            # Log raw response structure
-            self.audit.log('DEBUG', f'Response keys: {list(data.keys())}')
-
-            # Check for done/done_reason fields (indicates completion status)
-            if 'done' in data:
-                self.audit.log('DEBUG', f'Ollama done={data.get("done")}, done_reason={data.get("done_reason", "N/A")}')
-
-            content = data.get('message', {}).get('content', '')
-
-            self.audit.log('INFO', f'Received response ({len(content)} chars)')
-
-            # Log first and last 500 chars of raw response for debugging
-            self.audit.log('DEBUG', f'Response START: {content[:500]}')
-            if len(content) > 500:
-                self.audit.log('DEBUG', f'Response END: {content[-500:]}')
-
-            # Check if response appears truncated (ends mid-sentence or mid-tag)
-            if content.endswith('<') or content.endswith('<think') or content.endswith('<think>'):
-                self.audit.log('WARNING', 'Response appears truncated (ends with incomplete tag)')
-            elif not content.rstrip().endswith(('.', ':', '`', '"', "'", ')', ']', '}', '\n')):
-                self.audit.log('WARNING', f'Response may be truncated (ends with: ...{content[-20:]})')
-
-            return content
+            return full_response
 
         except requests.exceptions.Timeout:
+            elapsed = time.time() - start_time
+            print(f"\r{Colors.FAIL}[X] Request timed out after {elapsed:.0f}s{Colors.ENDC}      ")
             self.audit.log('ERROR', f'Ollama API timeout after {self.timeout}s')
             return None
         except requests.exceptions.ConnectionError as e:
+            print(f"\r{Colors.FAIL}[X] Connection error: {str(e)[:50]}{Colors.ENDC}      ")
             self.audit.log('ERROR', f'Ollama connection error: {str(e)}')
             return None
         except Exception as e:
+            print(f"\r{Colors.FAIL}[X] Error: {str(e)[:50]}{Colors.ENDC}      ")
             self.audit.log('ERROR', f'Ollama API error: {str(e)}')
             return None
 
@@ -399,12 +536,12 @@ RECOMMENDED_ACTIONS:
         # Log raw response for debugging
         self.audit.log('DEBUG', f'Raw response length: {len(response)}')
         self.audit.log('DEBUG', f'Raw response first 300 chars: {response[:300]}')
-
+        
         # Check for <think> tags before stripping
         think_matches = list(re.finditer(r'<think>', response, re.IGNORECASE))
         think_end_matches = list(re.finditer(r'</think>', response, re.IGNORECASE))
         self.audit.log('DEBUG', f'Found {len(think_matches)} <think> tags, {len(think_end_matches)} </think> tags')
-
+        
         if think_matches:
             for i, match in enumerate(think_matches):
                 self.audit.log('DEBUG', f'<think> tag {i+1} at position {match.start()}')
@@ -414,20 +551,20 @@ RECOMMENDED_ACTIONS:
 
         # Strip <think> blocks (some models output reasoning) - handle multiple and mid-line occurrences
         original_len = len(response)
-
+        
         # First, remove complete <think>...</think> blocks
         response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL | re.IGNORECASE)
-
+        
         # Also handle unclosed <think> tags (thinking that continues to end of response)
         response = re.sub(r'<think>.*$', '', response, flags=re.DOTALL | re.IGNORECASE)
-
+        
         # Clean up any leftover artifacts from mid-line think tags
         response = re.sub(r'</?think[^>]*>', '', response, flags=re.IGNORECASE)
-
+        
         # Clean up extra whitespace and blank lines
         response = re.sub(r'\n\s*\n', '\n', response)
         response = response.strip()
-
+        
         self.audit.log('DEBUG', f'After think-stripping: {original_len} -> {len(response)} chars')
         self.audit.log('DEBUG', f'Stripped response: {response[:300] if response else "(empty)"}')
 
@@ -443,29 +580,55 @@ RECOMMENDED_ACTIONS:
         # Check if diagnosis is complete
         if re.search(r'DIAGNOSIS_COMPLETE:\s*true', response, re.IGNORECASE):
 
-            analysis_match = re.search(
-                r'FINAL_ANALYSIS:\s*(.+?)(?=RECOMMENDED_ACTIONS:|$)',
+            root_cause_match = re.search(
+                r'ROOT_CAUSE:\s*(.+?)(?=LONG_TERM_SOLUTION:|$)',
                 response,
                 re.DOTALL | re.IGNORECASE
             )
-            final_analysis = analysis_match.group(1).strip() if analysis_match else ''
+            root_cause = root_cause_match.group(1).strip() if root_cause_match else ''
 
-            actions = []
-            actions_section = re.search(
-                r'RECOMMENDED_ACTIONS:(.*?)$',
+            solution_match = re.search(
+                r'LONG_TERM_SOLUTION:\s*(.+?)(?=IMMEDIATE_ACTIONS:|PREVENTIVE_MEASURES:|COMMANDS_TO_IMPLEMENT:|$)',
                 response,
                 re.DOTALL | re.IGNORECASE
             )
-            if actions_section:
-                actions_text = actions_section.group(1)
-                action_lines = re.findall(r'^\d+\.\s*(.+?)$', actions_text, re.MULTILINE)
-                actions = [line.strip() for line in action_lines if line.strip()]
+            long_term_solution = solution_match.group(1).strip() if solution_match else ''
+
+            immediate_match = re.search(
+                r'IMMEDIATE_ACTIONS:\s*(.+?)(?=PREVENTIVE_MEASURES:|COMMANDS_TO_IMPLEMENT:|$)',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
+            immediate_actions = immediate_match.group(1).strip() if immediate_match else ''
+
+            preventive_match = re.search(
+                r'PREVENTIVE_MEASURES:\s*(.+?)(?=COMMANDS_TO_IMPLEMENT:|$)',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
+            preventive_measures = preventive_match.group(1).strip() if preventive_match else ''
+
+            commands_match = re.search(
+                r'COMMANDS_TO_IMPLEMENT:(.*?)$',
+                response,
+                re.DOTALL | re.IGNORECASE
+            )
+            implementation_commands = []
+            if commands_match:
+                commands_text = commands_match.group(1)
+                cmd_lines = re.findall(r'^\d+\.\s*(.+?)$', commands_text, re.MULTILINE)
+                implementation_commands = [line.strip() for line in cmd_lines if line.strip()]
 
             return {
                 'success': True,
                 'done': True,
-                'final_analysis': final_analysis,
-                'recommended_actions': actions,
+                'root_cause': root_cause,
+                'long_term_solution': long_term_solution,
+                'immediate_actions': immediate_actions,
+                'preventive_measures': preventive_measures,
+                'implementation_commands': implementation_commands,
+                'final_analysis': root_cause,  # Backward compatibility
+                'recommended_actions': implementation_commands,  # Backward compatibility
                 'raw_response': response
             }
 
@@ -487,7 +650,7 @@ RECOMMENDED_ACTIONS:
             response,
             re.IGNORECASE | re.DOTALL
         )
-
+        
         # If that didn't work, try multiline: NEXT_COMMAND:\n<command>
         if not command_match or not command_match.group(1).strip():
             command_match = re.search(
@@ -498,7 +661,7 @@ RECOMMENDED_ACTIONS:
 
         # Extract explanation - handle bold markers
         explanation_match = re.search(
-            r'EXPLANATION:\s*[*-]*\s*(.+?)(?:\n\n|\n-|\n\*|$)',
+            r'EXPLANATION:\s*[*-]*\s*(.+?)(?:\n\n|\n-|\n\*|TARGET_HOST:|NEXT_COMMAND:|$)',
             response,
             re.DOTALL | re.IGNORECASE
         )

@@ -121,7 +121,7 @@ observium2023 | hbcsrv12 | hbcsrv13  | Observium monitoring (syslog disabled)
 phpipam       | hbcsrv12 | hbcsrv06  | IP Address Management
 quicklinks    | hbcsrv12 | hbcsrv06  | Quick links web tool
 radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database
-syslog        | hbcsrv12 | hbcsrv13  | Centralized syslog storage
+syslog        | hbcsrv12 | hbcsrv13  | Centralized rsyslog
 wordpress     | hbcsrv12 | hbcsrv06  | WordPress site
 
 # ============================================================================

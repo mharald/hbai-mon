@@ -141,6 +141,20 @@ class CommandExecutor:
         
         return expanded
 
+    def _escape_for_bash(self, command: str) -> str:
+        """Escape special characters that bash would interpret"""
+        
+        # Escape backticks to prevent command substitution
+        # In bash, \` is a literal backtick
+        escaped = command.replace('`', '\\`')
+        
+        if escaped != command:
+            self.audit.log('DEBUG', f'Escaped backticks in command')
+            self.audit.log('DEBUG', f'Original: {command[:100]}')
+            self.audit.log('DEBUG', f'Escaped: {escaped[:100]}')
+        
+        return escaped
+
     def execute_single_diagnostic(self, hostname: str, command: str) -> Dict:
         """Execute a single diagnostic command on target host via cn script"""
         
@@ -167,10 +181,13 @@ class CommandExecutor:
                 self.audit.log('DEBUG', f'Original command: {command}')
                 self.audit.log('DEBUG', f'Expanded to: {expanded_command}')
             
-            self.audit.log('DEBUG', f'Executing on {target_host}: {expanded_command[:200]}')
+            # Escape special bash characters (backticks, etc.)
+            escaped_command = self._escape_for_bash(expanded_command)
+            
+            self.audit.log('DEBUG', f'Executing on {target_host}: {escaped_command[:200]}')
             
             # Encode command as base64 to avoid ALL quoting issues
-            encoded_command = base64.b64encode(expanded_command.encode('utf-8')).decode('ascii')
+            encoded_command = base64.b64encode(escaped_command.encode('utf-8')).decode('ascii')
             
             # DEBUG: Log what we're actually sending
             self.audit.log('DEBUG', f'Base64 encoded command: {encoded_command}')

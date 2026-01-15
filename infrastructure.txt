@@ -2,7 +2,7 @@
 # Home Boehmecke Infrastructure - AI Reference Document
 # ============================================================================
 # This file provides context for automated diagnostics. Keep it updated.
-# Last updated: 2026-01-04
+# Last updated: 2026-01-15
 # ============================================================================
 
 # ============================================================================
@@ -31,6 +31,7 @@
 #   VLAN 15 | Admin             | 192.168.190.0/29  | Administrative access
 #   VLAN 16 | Home              | 192.168.190.128/25| Home automation
 #   VLAN 17 | Work              | 192.168.190.32/28 | Work devices
+#   VLAN 19 | Vault Isolated    | 192.168.190.16/28 | Secrets management (isolated)
 #
 # Management access: All hosts reachable via jumpserver hbcsrv14 (VLAN 15)
 
@@ -59,8 +60,9 @@ hbcsrv02.internal.boehmecke.org | ctx | 3 | dns-secondary | BIND secondary DNS
 hbcsrv03.internal.boehmecke.org | ctx | 3 | dhcp-primary | ISC DHCP primary
 hbcsrv04.internal.boehmecke.org | ctx | 3 | dhcp-secondary | ISC DHCP secondary
 
-# --- Authentication ---
+# --- Authentication & Secrets ---
 hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority
+hbcvau01.internal.boehmecke.org | ctx | 19 | vault-server | HashiCorp Vault, centralized IaC secrets management
 
 # --- Web & Applications ---
 hbcsrv06.internal.boehmecke.org | ctx | 3 | webserver | Apache reverse proxy, legacy Docker host (migrating to hbcsrv16)
@@ -101,9 +103,9 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 #
 # Containers (pct):
 #   100=hbcsrv01  102=hbcsrv13  103=hbcsrv02  104=hbcsrv12
-#   106=hbcsrv07  108=hbcsrv14  109=hbcsrv06  110=hbcsrv08
-#   113=hbcsrv15  115=hbcsrv16  116=hbcsrv17  119=hbcsrv03
-#   120=hbcsrv04  121=hbcsrv05  122=hbcsrv10
+#   106=hbcsrv07  107=hbcvau01  108=hbcsrv14  109=hbcsrv06
+#   110=hbcsrv08  113=hbcsrv15  115=hbcsrv16  116=hbcsrv17
+#   119=hbcsrv03  120=hbcsrv04  121=hbcsrv05  122=hbcsrv10
 #
 # VMs (qm):
 #   114=hbvsrv03  117=hbvsrv15
@@ -153,7 +155,34 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 # ============================================================================
 # Proxmox (hbpm01) backs up all VMs/containers to hblan (CIFS: HBLAN-BACKUP)
 # hblanmc syncs critical data to hblan
+# hbcvau01 (Vault) included in Proxmox backup rotation
 # Note: NAS devices are often powered off to save energy
+
+# ============================================================================
+# VAULT INFRASTRUCTURE (PHASE 1)
+# ============================================================================
+# Vault Server: hbcvau01.internal.boehmecke.org
+#   Container ID: 107 (on hbpm01)
+#   Network: VLAN 19 (Vault Isolated), 192.168.190.18/28
+#   Hypervisor: hbpm01 (Proxmox)
+#   OS: Ubuntu 24.04 LTS
+#   Resources: 1 CPU, 512 MB RAM, 10 GB storage, no swap
+#   Storage Backend: File-based (/vault/data)
+#   TLS: Certificate from hbcsrv05 CA (2-year validity)
+#   Authentication: AppRole (for IaC), local console (emergency)
+#   Auto-unseal: Local script with 3-of-5 keys
+#   Audit Logging: File-based (/vault/logs/audit.log)
+#   Backup: Proxmox daily to hblan + encrypted tarball script
+#
+# Access:
+#   From: hbpm01 (IaC/Ansible), hbcsrv14 (emergency admin access)
+#   Port: 8200 (HTTPS, API-only, no UI)
+#   Console: Proxmox LXC console (for emergencies)
+#
+# Secrets Stored:
+#   - SSH keys (LXC deployment)
+#   - RADIUS PSK (PAM authentication)
+#   - MySQL credentials (applications)
 
 # ============================================================================
 # COMMON DISK SPACE ISSUES

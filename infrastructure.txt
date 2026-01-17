@@ -32,6 +32,7 @@
 #   VLAN 16 | Home              | 192.168.190.128/25| Home automation
 #   VLAN 17 | Work              | 192.168.190.32/28 | Work devices
 #   VLAN 19 | Vault Isolated    | 192.168.190.16/28 | Secrets management (isolated)
+#   VLAN 20 | IaC Zone          | 192.168.190.64/28 | Infrastructure automation
 #
 # Management access: All hosts reachable via jumpserver hbcsrv14 (VLAN 15)
 
@@ -79,6 +80,9 @@ hbcsrv13.internal.boehmecke.org | ctx | 3 | monitoring | Observium + Syslog rece
 hbcsrv15.internal.boehmecke.org | ctx | 3 | elasticsearch | ElasticSearch + Apache Tika
 hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale; manages agents on other hosts
 
+# --- Infrastructure Automation ---
+hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible, manages infrastructure deployment
+
 # --- Other ---
 hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz | DMZ Linux server (isolated network)
 hbcsrv17.internal.boehmecke.org | ctx | 3 | cron | Scheduled tasks server (currently idle, no active jobs)
@@ -106,6 +110,7 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 #   106=hbcsrv07  107=hbcvau01  108=hbcsrv14  109=hbcsrv06
 #   110=hbcsrv08  113=hbcsrv15  115=hbcsrv16  116=hbcsrv17
 #   119=hbcsrv03  120=hbcsrv04  121=hbcsrv05  122=hbcsrv10
+#   111=hbciac01
 #
 # VMs (qm):
 #   114=hbvsrv03  117=hbvsrv15

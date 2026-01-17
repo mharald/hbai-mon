@@ -190,6 +190,37 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 #   - MySQL credentials (applications)
 
 # ============================================================================
+# LXC CONTAINER CREATION (Proxmox CLI)
+# ============================================================================
+# Standard command template for creating new containers:
+#
+# pct create <VMID> <TEMPLATE> \
+#   --hostname <hostname> \
+#   --cores <cpu_cores> \
+#   --memory <ram_mb> \
+#   --swap 0 \
+#   --rootfs lvm_m2_2tb:<size_gb> \
+#   --net0 name=eth0,bridge=vmbr<vlan>,ip=<ip>/<cidr>,gw=<gateway> \
+#   --nameserver 192.168.179.130 \
+#   --nameserver 192.168.179.131 \
+#   --searchdomain internal.boehmecke.org \
+#   --unprivileged 1 \
+#   --features nesting=1 \
+#   --onboot 1 \
+#   --start 1
+#
+# Key notes:
+# - Template location: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+# - Storage backend: lvm_m2_2tb (all containers)
+# - Network bridges: vmbr<N> where N = VLAN number (no tagging, dedicated bridges)
+# - DNS servers: 192.168.179.130/131 (hbcsrv01/hbcsrv02)
+# - Always unprivileged, no swap, nesting enabled
+#
+# For containers with separate data mountpoints, add after creation:
+#   pct set <VMID> -mp0 lvm_m2_2tb:<size>,mp=/<hostname>/<purpose>
+#
+
+# ============================================================================
 # COMMON DISK SPACE ISSUES
 # ============================================================================
 # These hosts/paths frequently fill up:

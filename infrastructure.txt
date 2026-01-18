@@ -2,7 +2,7 @@
 # Home Boehmecke Infrastructure - AI Reference Document
 # ============================================================================
 # This file provides context for automated diagnostics. Keep it updated.
-# Last updated: 2026-01-15
+# Last updated: 2026-01-18
 # ============================================================================
 
 # ============================================================================
@@ -32,7 +32,7 @@
 #   VLAN 16 | Home              | 192.168.190.128/25| Home automation
 #   VLAN 17 | Work              | 192.168.190.32/28 | Work devices
 #   VLAN 19 | Vault Isolated    | 192.168.190.16/28 | Secrets management (isolated)
-#   VLAN 20 | IaC Zone          | 192.168.190.64/28 | Infrastructure automation
+#   VLAN 20 | IaC Zone          | 192.168.190.64/28 | Infrastructure as Code operations
 #
 # Management access: All hosts reachable via jumpserver hbcsrv14 (VLAN 15)
 
@@ -65,6 +65,9 @@ hbcsrv04.internal.boehmecke.org | ctx | 3 | dhcp-secondary | ISC DHCP secondary
 hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority
 hbcvau01.internal.boehmecke.org | ctx | 19 | vault-server | HashiCorp Vault, centralized IaC secrets management
 
+# --- Infrastructure as Code ---
+hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible operational center
+
 # --- Web & Applications ---
 hbcsrv06.internal.boehmecke.org | ctx | 3 | webserver | Apache reverse proxy, legacy Docker host (migrating to hbcsrv16)
 hbcsrv07.internal.boehmecke.org | ctx | 3 | wlan-controller | TP-Link Omada controller
@@ -79,9 +82,6 @@ hbcsrv13.internal.boehmecke.org | ctx | 3 | monitoring | Observium + Syslog rece
 # --- Docker Infrastructure ---
 hbcsrv15.internal.boehmecke.org | ctx | 3 | elasticsearch | ElasticSearch + Apache Tika
 hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale; manages agents on other hosts
-
-# --- Infrastructure Automation ---
-hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible, manages infrastructure deployment
 
 # --- Other ---
 hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz | DMZ Linux server (isolated network)
@@ -108,9 +108,9 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 # Containers (pct):
 #   100=hbcsrv01  102=hbcsrv13  103=hbcsrv02  104=hbcsrv12
 #   106=hbcsrv07  107=hbcvau01  108=hbcsrv14  109=hbcsrv06
-#   110=hbcsrv08  113=hbcsrv15  115=hbcsrv16  116=hbcsrv17
-#   119=hbcsrv03  120=hbcsrv04  121=hbcsrv05  122=hbcsrv10
-#   111=hbciac01
+#   110=hbcsrv08  111=hbciac01  113=hbcsrv15  115=hbcsrv16
+#   116=hbcsrv17  119=hbcsrv03  120=hbcsrv04  121=hbcsrv05
+#   122=hbcsrv10
 #
 # VMs (qm):
 #   114=hbvsrv03  117=hbvsrv15
@@ -161,10 +161,12 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 # Proxmox (hbpm01) backs up all VMs/containers to hblan (CIFS: HBLAN-BACKUP)
 # hblanmc syncs critical data to hblan
 # hbcvau01 (Vault) included in Proxmox backup rotation
+# hbciac01 persistent storage (/hbciac01) should be backed up manually
+# hbcsrv14 persistent storage (/hbcsrv14) should be backed up manually
 # Note: NAS devices are often powered off to save energy
 
 # ============================================================================
-# VAULT INFRASTRUCTURE (PHASE 1)
+# VAULT INFRASTRUCTURE
 # ============================================================================
 # Vault Server: hbcvau01.internal.boehmecke.org
 #   Container ID: 107 (on hbpm01)
@@ -180,9 +182,18 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 #   Backup: Proxmox daily to hblan + encrypted tarball script
 #
 # Access:
-#   From: hbpm01 (IaC/Ansible), hbcsrv14 (emergency admin access)
+#   From: hbciac01 (IaC automation), hbcsrv14 (admin access)
 #   Port: 8200 (HTTPS, API-only, no UI)
 #   Console: Proxmox LXC console (for emergencies)
+#
+# AppRoles:
+#   iac-deploy   | Automation workload identity  | Policy: iac-deploy-policy
+#   iac-admin    | Human administrator identity  | Policy: iac-admin-policy
+#
+# SSH Certificate Authority:
+#   Enabled: Yes
+#   Roles: iac-deploy (4h TTL), iac-admin (8h TTL, max 24h)
+#   Trusted by: hbciac01, (future IaC-managed hosts)
 #
 # Secrets Stored:
 #   - SSH keys (LXC deployment)
@@ -190,35 +201,102 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 #   - MySQL credentials (applications)
 
 # ============================================================================
-# LXC CONTAINER CREATION (Proxmox CLI)
+# IAC INFRASTRUCTURE
 # ============================================================================
-# Standard command template for creating new containers:
+# IaC Orchestration: hbciac01.internal.boehmecke.org
+#   Container ID: 111 (on hbpm01)
+#   Network: VLAN 20 (IaC Zone), 192.168.190.66/28
+#   Hypervisor: hbpm01 (Proxmox)
+#   OS: Ubuntu 24.04 LTS
+#   Resources: 1 CPU, 512 MB RAM, 8 GB root + 8 GB data (/hbciac01)
+#   Proxmox Pool: hb-lx-critical
 #
-# pct create <VMID> <TEMPLATE> \
-#   --hostname <hostname> \
-#   --cores <cpu_cores> \
-#   --memory <ram_mb> \
-#   --swap 0 \
-#   --rootfs lvm_m2_2tb:<size_gb> \
-#   --net0 name=eth0,bridge=vmbr<vlan>,ip=<ip>/<cidr>,gw=<gateway> \
-#   --nameserver 192.168.179.130 \
-#   --nameserver 192.168.179.131 \
-#   --searchdomain internal.boehmecke.org \
-#   --unprivileged 1 \
-#   --features nesting=1 \
-#   --onboot 1 \
-#   --start 1
+# Installed Tools:
+#   - Terraform v1.14.3
+#   - Ansible v2.16.3
+#   - Vault CLI v1.21.2
 #
-# Key notes:
-# - Template location: local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst
-# - Storage backend: lvm_m2_2tb (all containers)
-# - Network bridges: vmbr<N> where N = VLAN number (no tagging, dedicated bridges)
-# - DNS servers: 192.168.179.130/131 (hbcsrv01/hbcsrv02)
-# - Always unprivileged, no swap, nesting enabled
+# Persistent Storage Structure:
+#   /hbciac01/workspace/  | Vault credentials, certificates (mode 700)
+#   /hbciac01/bin/        | Helper scripts (mode 755)
 #
-# For containers with separate data mountpoints, add after creation:
-#   pct set <VMID> -mp0 lvm_m2_2tb:<size>,mp=/<hostname>/<purpose>
+# Users:
+#   iac-deploy | Automation user | sudo NOPASSWD, owns Vault credentials
+#   iac-admin  | Human admin     | sudo NOPASSWD
 #
+# Vault Integration:
+#   - AppRole: iac-deploy (role-id/secret-id in /hbciac01/workspace/)
+#   - SSH CA: Configured, certificates auto-generated
+#   - Helper: /hbciac01/bin/vault-login-iac (symlinked to /usr/local/bin/)
+#
+# SSH Certificate Authentication:
+#   - Trusted CA: /etc/ssh/trusted-ca/vault-ca.pub
+#   - iac-deploy can SSH to localhost using certificates
+#   - Managed hosts will trust same Vault SSH CA
+
+# ============================================================================
+# JUMPSERVER INFRASTRUCTURE
+# ============================================================================
+# Jumpserver: hbcsrv14.internal.boehmecke.org
+#   Container ID: 108 (on hbpm01)
+#   Network: VLAN 15 (Admin), 192.168.190.2/29
+#   Role: SSH gateway for all infrastructure access
+#
+# Persistent Storage Structure:
+#   /hbcsrv14/workspace/     | Vault credentials, certificates (mode 700)
+#   /hbcsrv14/workspace/ca/  | Internal CA certificates
+#   /hbcsrv14/bin/           | Helper scripts (mode 755)
+#
+# Users:
+#   iac-admin | Human administrator | sudo NOPASSWD, SSH cert-based auth to IaC hosts
+#
+# Vault Integration:
+#   - AppRole: iac-admin (role-id/secret-id in /hbcsrv14/workspace/)
+#   - Vault CLI installed
+#   - Helper: /hbcsrv14/bin/vault-login-iac-admin (symlinked to /usr/local/bin/)
+#   - Internal CA trusted: /usr/local/share/ca-certificates/boehmecke-ca.crt
+#
+# SSH Certificate Authentication:
+#   - iac-admin can SSH to hbciac01 using Vault-signed certificates
+#   - Certificate TTL: 8h (max 24h)
+
+# ============================================================================
+# PERSISTENT STORAGE DISCIPLINE
+# ============================================================================
+# CRITICAL: All containers with automated/scripted workflows MUST use persistent
+# storage mounted outside the container root filesystem. This ensures configuration,
+# credentials, and scripts survive container rebuilds.
+#
+# Standard Structure:
+#   /<hostname>/workspace/  | Credentials, configs (restrictive permissions)
+#   /<hostname>/bin/        | Scripts, utilities (world-readable/executable)
+#   /<hostname>/data/       | Application data (as needed)
+#
+# Current Implementations:
+#   /hbciac01/  | IaC orchestration persistent storage
+#   /hbcsrv14/  | Jumpserver persistent storage
+#
+# Future containers should follow this pattern. Document all persistent mounts
+# in this file when created.
+
+# ============================================================================
+# IDENTITY AND ACCESS MANAGEMENT
+# ============================================================================
+# Human Identities:
+#   iac-admin      | Infrastructure administrators | SSH cert-based auth, Vault access
+#   vault-admin    | Vault administrators          | Console/token access to Vault
+#
+# Machine/Workload Identities:
+#   iac-deploy     | Automation workloads          | Terraform, Ansible operations
+#
+# Authentication Flow:
+#   1. Human logs into hbcsrv14 (jumpserver) as iac-admin
+#   2. Requests SSH certificate from Vault using iac-admin AppRole
+#   3. Uses certificate to access IaC hosts (hbciac01, future managed hosts)
+#   4. Automation runs as iac-deploy using iac-deploy AppRole credentials
+#
+# Principle: Separate human identity (iac-admin) from workload identity (iac-deploy)
+# for clear audit trails and proper least-privilege access control.
 
 # ============================================================================
 # COMMON DISK SPACE ISSUES

@@ -2,7 +2,7 @@
 # Home Boehmecke Infrastructure - AI Reference Document
 # ============================================================================
 # This file provides context for automated diagnostics. Keep it updated.
-# Last updated: 2026-01-31
+# Last updated: 2026-02-07
 # ============================================================================
 
 # ============================================================================
@@ -54,7 +54,7 @@
 hbpm01.internal.boehmecke.org | hypervisor | 3 | proxmox | Primary Proxmox host, all VMs/containers, local LVM storage (lvm_m2_2tb)
 
 # --- Administrative ---
-hbcsrv14.internal.boehmecke.org | ctx | 15 | jumpserver | Gateway for all SSH access, required for NAS/switches/appliances
+hbcsrv14.internal.boehmecke.org | ctx | 15 | jumpserver | Gateway for all SSH access, required for NAS/switches/appliances (legacy, replaced by hbcadm01)
 
 # --- DNS & DHCP ---
 hbcsrv01.internal.boehmecke.org | ctx | 3 | dns-primary | BIND primary DNS
@@ -63,7 +63,7 @@ hbcsrv03.internal.boehmecke.org | ctx | 3 | dhcp-primary | ISC DHCP primary
 hbcsrv04.internal.boehmecke.org | ctx | 3 | dhcp-secondary | ISC DHCP secondary
 
 # --- Authentication & Secrets ---
-hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority
+hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority (dynamic_clients enabled)
 hbcvau01.internal.boehmecke.org | ctx | 19 | vault-server | HashiCorp Vault, centralized IaC secrets management
 
 # --- Web & Applications ---
@@ -82,8 +82,10 @@ hbcsrv15.internal.boehmecke.org | ctx | 3 | elasticsearch | ElasticSearch + Apac
 hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale; manages agents on other hosts
 
 # --- IaC Infrastructure ---
-hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible orchestration host
-hbcapt01.internal.boehmecke.org | ctx | 21 | apt-cacher | apt-cacher-ng proxy for all containers
+hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible orchestration host, workspace at /opt/persistent
+hbcapt01.internal.boehmecke.org | ctx | 21 | apt-cacher | apt-cacher-ng proxy for all containers (tier 0)
+hbcgit01.internal.boehmecke.org | ctx | 3 | gitea | Self-hosted Gitea, IaC git repository (tier 1)
+hbcadm01.internal.boehmecke.org | ctx | 15 | jumpserver-new | IaC-managed replacement for hbcsrv14 (tier 1, WIP)
 
 # --- Other ---
 hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz | DMZ Linux server (isolated network)
@@ -112,7 +114,9 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 # 1100-1999   | Test/development
 #
 # Current IaC Production Containers:
-#   200=hbcapt01 (apt-cacher-ng)
+#   200=hbcapt01 (apt-cacher-ng, tier 0)
+#   201=hbcgit01 (Gitea, tier 1)
+#   202=hbcadm01 (admin jumpserver, tier 1, WIP)
 #
 # Legacy Containers (100-199):
 #   100=hbcsrv01  102=hbcsrv13  103=hbcsrv02  104=hbcsrv12
@@ -123,6 +127,8 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 #
 # VMs (qm):
 #   114=hbvsrv03  117=hbvsrv15
+#
+# Resource Pool: hb-lx-critical (all IaC containers)
 #
 # Commands:
 #   pct exec <CTID> -- <command>        # Containers
@@ -147,7 +153,10 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 #   chown 100000:100000 /mnt
 #   umount /mnt
 #
-data-hbcapt01-aptcacherng | 50G | hbcapt01 | /opt/persistent/apt-cacher-ng | apt-cacher-ng cache
+data-hbciac01-iac          | 8G  | hbciac01 | /opt/persistent                | IaC workspace (terraform, ansible, docs)
+data-hbcapt01-aptcacherng  | 50G | hbcapt01 | /opt/persistent/apt-cacher-ng  | apt-cacher-ng cache
+data-hbcgit01-gitea        |     | hbcgit01 | /opt/persistent/gitea          | Gitea repos, data, SQLite DB
+data-hbcadm01-admin        |     | hbcadm01 | /opt/persistent                | Admin workspace
 
 # Future volumes:
 # data-hbcmysql01-mysql | 500G | hbcmysql01 | /opt/persistent/mysql | MySQL data
@@ -165,7 +174,7 @@ my_wiki       | hbcsrv12 | hbcsrv06  | Wiki application
 observium2023 | hbcsrv12 | hbcsrv13  | Observium monitoring (syslog disabled)
 phpipam       | hbcsrv12 | hbcsrv06  | IP Address Management
 quicklinks    | hbcsrv12 | hbcsrv06  | Quick links web tool
-radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database
+radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database (+ dynamic_clients lookups)
 syslog        | hbcsrv12 | hbcsrv13  | Centralized rsyslog
 wordpress     | hbcsrv12 | hbcsrv06  | WordPress site
 
@@ -230,6 +239,8 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 #   - RADIUS PSK (PAM authentication)
 #   - SNMPv3 credentials
 #   - FreeRADIUS DB credentials
+#   - Internal wildcard TLS certificate
+#   - Gitea access token
 
 # ============================================================================
 # IAC ORCHESTRATION HOST
@@ -239,16 +250,19 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 #   Network: VLAN 20 (IaC Zone), 192.168.190.66/28
 #   OS: Ubuntu 24.04 LTS
 #   Software: Terraform, Ansible, Vault CLI
-#   Workspace: /hbciac01/workspace/
+#   Workspace: /opt/persistent/ (persistent LVM volume: data-hbciac01-iac)
 #
 # Access:
 #   From: hbcsrv14 (admin SSH)
 #   To: Vault (hbcvau01), Proxmox API (hbpm01), FortiGate API, DNS
 #
 # Workflow:
-#   1. source vault-iac-deploy-login.sh
+#   1. source /opt/persistent/vault-init.sh
 #   2. cd terraform && terraform apply
 #   3. cd ../ansible && ansible-playbook playbooks/site.yml
+#
+# Git Remote:
+#   https://git.internal.boehmecke.org/boehmecke.org/Infrastructure-as-Code.git
 
 # ============================================================================
 # COMMON DISK SPACE ISSUES

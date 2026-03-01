@@ -2,7 +2,7 @@
 # Home Boehmecke Infrastructure - AI Reference Document
 # ============================================================================
 # This file provides context for automated diagnostics. Keep it updated.
-# Last updated: 2026-02-07
+# Last updated: 2026-03-01
 # ============================================================================
 
 # ============================================================================
@@ -35,26 +35,20 @@
 #   VLAN 19 | Vault Isolated    | 192.168.190.16/28 | Secrets management (isolated)
 #   VLAN 20 | IaC Zone          | 192.168.190.64/28 | IaC orchestration (vs003-iac00)
 #
-# Management access: All hosts reachable via jumpserver hbcsrv14 (VLAN 15)
+# Management access: All hosts reachable via hbcadm01 or hbcadm02 (VLAN 15)
 
 # ============================================================================
 # HOSTS
 # ============================================================================
 # Format: hostname | type | vlan | role | description
-#
-# Types:
-#   hypervisor = Proxmox physical host
-#   ctx        = LXC container (on hbpm01)
-#   vm         = QEMU VM (on hbpm01)
-#   appliance  = Network appliance
-#   switch     = Network switch
-#   nas        = Network attached storage
 
 # --- Hypervisor ---
 hbpm01.internal.boehmecke.org | hypervisor | 3 | proxmox | Primary Proxmox host, all VMs/containers, local LVM storage (lvm_m2_2tb)
 
 # --- Administrative ---
-hbcsrv14.internal.boehmecke.org | ctx | 15 | jumpserver | Gateway for all SSH access, required for NAS/switches/appliances (legacy, replaced by hbcadm01)
+hbcadm01.internal.boehmecke.org | ctx | 15 | admin-jumpserver | IaC-managed admin workstation, replacing hbcsrv14 (CTID 202)
+hbcadm02.internal.boehmecke.org | ctx | 15 | emergency-admin | Alpine emergency fallback, no IaC deps (CTID 112, pet)
+hbcsrv14.internal.boehmecke.org | ctx | 15 | jumpserver-legacy | Legacy jumpserver, being replaced by hbcadm01
 
 # --- DNS & DHCP ---
 hbcsrv01.internal.boehmecke.org | ctx | 3 | dns-primary | BIND primary DNS
@@ -64,44 +58,50 @@ hbcsrv04.internal.boehmecke.org | ctx | 3 | dhcp-secondary | ISC DHCP secondary
 
 # --- Authentication & Secrets ---
 hbcsrv05.internal.boehmecke.org | ctx | 3 | freeradius | FreeRADIUS + Certificate Authority (dynamic_clients enabled)
-hbcvau01.internal.boehmecke.org | ctx | 19 | vault-server | HashiCorp Vault, centralized IaC secrets management
+hbcvau01.internal.boehmecke.org | ctx | 19 | vault-server | HashiCorp Vault, centralized IaC secrets management (CTID 107)
 
 # --- Web & Applications ---
-hbcsrv06.internal.boehmecke.org | ctx | 3 | webserver | Apache reverse proxy, legacy Docker host (migrating to hbcsrv16)
+hbcsrv06.internal.boehmecke.org | ctx | 3 | webserver-legacy | Apache reverse proxy, legacy Docker host (migrating to hbcweb01/02)
 hbcsrv07.internal.boehmecke.org | ctx | 3 | wlan-controller | TP-Link Omada controller
-hbcsrv08.internal.boehmecke.org | ctx | 3 | mediaserver | Jellyfin, mounts NFS from hblanmc (videos, series, fotos)
+hbcsrv08.internal.boehmecke.org | ctx | 3 | mediaserver | Jellyfin, mounts NFS from hblanmc
+hbcweb01.internal.boehmecke.org | ctx | 3 | webserver | IaC Apache web server, static files + Observium agent host (CTID 203)
+hbcweb02.internal.boehmecke.org | ctx | 3 | reverse-proxy | IaC Apache reverse proxy, HTTPS (CTID 204)
+
+# --- Source Control ---
+hbcgit01.internal.boehmecke.org | ctx | 3 | gitea | Self-hosted Gitea, HTTPS on 443 (CTID 201)
+
+# --- DMZ ---
+hbcdmz01.internal.boehmecke.org | ctx | 12 | dmz-alpine | IaC Alpine DMZ server, fail2ban (CTID 205)
+hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz-legacy | Legacy DMZ Linux server (being replaced by hbcdmz01)
 
 # --- Databases ---
 hbcsrv12.internal.boehmecke.org | ctx | 3 | mysql | Central MySQL server for all applications
 
 # --- Monitoring & Logging ---
-hbcsrv13.internal.boehmecke.org | ctx | 3 | monitoring | Observium + Syslog receiver (disk fills quickly from logs)
+hbcsrv13.internal.boehmecke.org | ctx | 3 | monitoring | Observium + Syslog receiver (disk fills quickly)
 
 # --- Docker Infrastructure ---
 hbcsrv15.internal.boehmecke.org | ctx | 3 | elasticsearch | ElasticSearch + Apache Tika
-hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale; manages agents on other hosts
+hbcsrv16.internal.boehmecke.org | ctx | 3 | docker-primary | Portainer CE (master), Radicale
 
 # --- IaC Infrastructure ---
-hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible orchestration host, workspace at /opt/persistent
-hbcapt01.internal.boehmecke.org | ctx | 21 | apt-cacher | apt-cacher-ng proxy for all containers (tier 0)
-hbcgit01.internal.boehmecke.org | ctx | 3 | gitea | Self-hosted Gitea, IaC git repository (tier 1)
-hbcadm01.internal.boehmecke.org | ctx | 15 | jumpserver-new | IaC-managed replacement for hbcsrv14 (tier 1, WIP)
+hbciac01.internal.boehmecke.org | ctx | 20 | iac-orchestration | Terraform + Ansible orchestration host (CTID 111)
+hbcapt01.internal.boehmecke.org | ctx | 21 | apt-cacher | apt-cacher-ng proxy for all containers (CTID 200)
 
 # --- Other ---
-hbcsrv10.internal.boehmecke.org | ctx | 12 | dmz | DMZ Linux server (isolated network)
-hbcsrv17.internal.boehmecke.org | ctx | 3 | cron | Scheduled tasks server (currently idle, no active jobs)
+hbcsrv17.internal.boehmecke.org | ctx | 3 | cron | Scheduled tasks server (currently idle)
 
 # --- Virtual Machines ---
 hbvsrv03.internal.boehmecke.org | vm | 3 | ntp | NTP server for infrastructure
-hbvsrv15.internal.boehmecke.org | vm | 16 | homeassistant | Home Assistant (alias: hbhass), disk fills from database/logs
+hbvsrv15.internal.boehmecke.org | vm | 16 | homeassistant | Home Assistant (alias: hbhass)
 
-# --- Network Equipment (access via hbcsrv14) ---
-hbfwmgmt.internal.boehmecke.org | appliance | 7 | firewall | FortiGate 50E, main firewall
+# --- Network Equipment (access via hbcadm01/hbcadm02) ---
+hbfwmgmt.internal.boehmecke.org | appliance | 7 | firewall | FortiGate 50E, main firewall (1024 custom services/VDOM limit)
 hbsw03.internal.boehmecke.org | switch | 10 | switch | Alcatel managed switch
 
-# --- Storage (access via hbcsrv14, often powered off) ---
-hblan.internal.boehmecke.org | nas | 3 | backup-nas | QNAP TS-419P II, backup target for Proxmox and hblanmc
-hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary storage, NFS exports for filerun/media
+# --- Storage (often powered off) ---
+hblan.internal.boehmecke.org | nas | 3 | backup-nas | QNAP TS-419P II, backup target
+hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary storage, NFS exports
 
 # ============================================================================
 # PROXMOX CTID ALLOCATION SCHEME
@@ -114,25 +114,27 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 # 1100-1999   | Test/development
 #
 # Current IaC Production Containers:
-#   200=hbcapt01 (apt-cacher-ng, tier 0)
-#   201=hbcgit01 (Gitea, tier 1)
-#   202=hbcadm01 (admin jumpserver, tier 1, WIP)
+#   200=hbcapt01 (apt-cacher-ng)
+#   201=hbcgit01 (Gitea)
+#   202=hbcadm01 (admin jumpserver)
+#   203=hbcweb01 (web server)
+#   204=hbcweb02 (reverse proxy)
+#   205=hbcdmz01 (Alpine DMZ)
+#
+# Pet Containers:
+#   107=hbcvau01 (Vault)
+#   111=hbciac01 (IaC orchestration)
+#   112=hbcadm02 (Alpine emergency admin)
 #
 # Legacy Containers (100-199):
 #   100=hbcsrv01  102=hbcsrv13  103=hbcsrv02  104=hbcsrv12
-#   106=hbcsrv07  107=hbcvau01  108=hbcsrv14  109=hbcsrv06
-#   110=hbcsrv08  111=hbciac01  113=hbcsrv15  115=hbcsrv16
+#   106=hbcsrv07  108=hbcsrv14  109=hbcsrv06
+#   110=hbcsrv08  113=hbcsrv15  115=hbcsrv16
 #   116=hbcsrv17  119=hbcsrv03  120=hbcsrv04  121=hbcsrv05
 #   122=hbcsrv10
 #
 # VMs (qm):
 #   114=hbvsrv03  117=hbvsrv15
-#
-# Resource Pool: hb-lx-critical (all IaC containers)
-#
-# Commands:
-#   pct exec <CTID> -- <command>        # Containers
-#   qm guest exec <CTID> -- <command>   # VMs with qemu-guest-agent
 
 # ============================================================================
 # PERSISTENT STORAGE VOLUMES (IaC)
@@ -140,50 +142,33 @@ hblanmc.internal.boehmecke.org | nas | 3 | primary-nas | QNAP TS-251+, primary s
 # Format: volume_name | size | container | mountpoint | purpose
 #
 # Naming convention: data-<hostname>-<service>
-# These volumes are OUTSIDE Terraform management, attached via Ansible pct set
-# Volumes survive container destruction (not named vm-<CTID>-disk-*)
 #
-# IMPORTANT: Unprivileged LXC containers map UID 0 to UID 100000 on host.
-# Volumes must be chown 100000:100000 on host before use.
-#
-# Volume Creation Procedure (on hbpm01):
-#   lvcreate -V <size>G -n data-<hostname>-<service> -T lvm_m2_2tb/lvm_m2_2tb
-#   mkfs.ext4 /dev/lvm_m2_2tb/data-<hostname>-<service>
-#   mount /dev/lvm_m2_2tb/data-<hostname>-<service> /mnt
-#   chown 100000:100000 /mnt
-#   umount /mnt
-#
-data-hbciac01-iac          | 8G  | hbciac01 | /opt/persistent                | IaC workspace (terraform, ansible, docs)
-data-hbcapt01-aptcacherng  | 50G | hbcapt01 | /opt/persistent/apt-cacher-ng  | apt-cacher-ng cache
-data-hbcgit01-gitea        |     | hbcgit01 | /opt/persistent/gitea          | Gitea repos, data, SQLite DB
-data-hbcadm01-admin        |     | hbcadm01 | /opt/persistent                | Admin workspace
-
-# Future volumes:
-# data-hbcmysql01-mysql | 500G | hbcmysql01 | /opt/persistent/mysql | MySQL data
-# data-hbcmysql01-backup | 200G | hbcmysql01 | /opt/persistent/backup | MySQL backups
+data-hbciac01-iac          | 8G   | hbciac01 | /opt/persistent            | IaC workspace
+data-hbcapt01-aptcacherng  | 50G  | hbcapt01 | /opt/persistent/apt-cacher-ng | apt-cacher-ng cache
+data-hbcgit01-gitea         |      | hbcgit01 | /opt/persistent/gitea      | Gitea repos + data
+data-hbcadm01-admin         |      | hbcadm01 | /opt/persistent            | admin workspace
+data-hbcweb01-web           |      | hbcweb01 | /opt/persistent            | web content + logs
+data-hbcweb02-rp            | 2G   | hbcweb02 | /opt/persistent            | reverse proxy logs
+data-hbcdmz01-fail2ban      | 100M | hbcdmz01 | /opt/persistent/fail2ban   | fail2ban ipset data
 
 # ============================================================================
 # MYSQL DATABASES
 # ============================================================================
-# Format: database | host | client | description
-#
-filerun_new   | hbcsrv12 | hbcsrv06  | FileRun file hosting (reverse proxy on hbcsrv06)
+filerun_new   | hbcsrv12 | hbcsrv06  | FileRun file hosting
 hbai          | hbcsrv12 | hbcsrv13  | HBAI-MON diagnostic system
 homeassistant | hbcsrv12 | hbvsrv15  | Home Assistant database
 my_wiki       | hbcsrv12 | hbcsrv06  | Wiki application
 observium2023 | hbcsrv12 | hbcsrv13  | Observium monitoring (syslog disabled)
 phpipam       | hbcsrv12 | hbcsrv06  | IP Address Management
 quicklinks    | hbcsrv12 | hbcsrv06  | Quick links web tool
-radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database (+ dynamic_clients lookups)
+radius-21     | hbcsrv12 | hbcsrv05  | FreeRADIUS database (dynamic_clients enabled)
 syslog        | hbcsrv12 | hbcsrv13  | Centralized rsyslog
 wordpress     | hbcsrv12 | hbcsrv06  | WordPress site
 
 # ============================================================================
 # DOCKER CONTAINERS
 # ============================================================================
-# Format: container | host | notes
-#
-# On hbcsrv06 (legacy, migrating away):
+# On hbcsrv06 (legacy, migrating to hbcweb01/02):
 open-webui      | hbcsrv06 | AI chat interface
 filerun         | hbcsrv06 | File hosting frontend
 portainer-agent | hbcsrv06 | Managed by Portainer on hbcsrv16
@@ -195,12 +180,10 @@ radicale        | hbcsrv16 | CalDAV/CardDAV server
 # ============================================================================
 # NFS MOUNTS
 # ============================================================================
-# Format: client | server | export | purpose
-#
-hbcsrv06 | hblanmc | nfs-documentos      | FileRun document storage
-hbcsrv08 | hblanmc | nfs-videos          | Jellyfin video library
-hbcsrv08 | hblanmc | nfs-series          | Jellyfin TV series
-hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
+hbcsrv06 | hblanmc | nfs-documentos | FileRun document storage
+hbcsrv08 | hblanmc | nfs-videos     | Jellyfin video library
+hbcsrv08 | hblanmc | nfs-series     | Jellyfin TV series
+hbcsrv08 | hblanmc | nfs-fotos      | Jellyfin photo library
 
 # ============================================================================
 # BACKUP RELATIONSHIPS
@@ -209,90 +192,35 @@ hbcsrv08 | hblanmc | nfs-fotos           | Jellyfin photo library
 # hblanmc syncs critical data to hblan
 # hbcvau01 (Vault) included in Proxmox backup rotation
 # hbciac01 workspace included in Proxmox backup rotation
-# Note: NAS devices are often powered off to save energy
 
 # ============================================================================
-# VAULT INFRASTRUCTURE (PHASE 1)
+# VAULT INFRASTRUCTURE
 # ============================================================================
-# Vault Server: hbcvau01.internal.boehmecke.org
-#   Container ID: 107 (on hbpm01)
-#   Network: VLAN 19 (Vault Isolated), 192.168.190.18/28
-#   Hypervisor: hbpm01 (Proxmox)
-#   OS: Ubuntu 24.04 LTS
-#   Resources: 1 CPU, 512 MB RAM, 10 GB storage, no swap
-#   Storage Backend: File-based (/vault/data)
-#   TLS: Certificate from hbcsrv05 CA (2-year validity)
-#   Authentication: AppRole (for IaC), local console (emergency)
-#   Auto-unseal: Local script with 3-of-5 keys
-#   Audit Logging: File-based (/vault/logs/audit.log)
-#   Backup: Proxmox daily to hblan + encrypted tarball script
-#
-# Access:
-#   From: hbciac01 (IaC/Ansible), hbcsrv14 (emergency admin access)
-#   Port: 8200 (HTTPS, API-only, no UI)
-#   Console: Proxmox LXC console (for emergencies)
-#
-# Secrets Stored:
-#   - Proxmox API tokens
-#   - FortiGate API key
-#   - BIND rndc-key
-#   - RADIUS PSK (PAM authentication)
-#   - SNMPv3 credentials
-#   - FreeRADIUS DB credentials
-#   - Internal wildcard TLS certificate
-#   - Gitea access token
+# Server: hbcvau01.internal.boehmecke.org
+#   CTID: 107 | VLAN 19 | 192.168.190.18/28
+#   TLS: Certificate from hbcsrv05 CA
+#   Auth: AppRole (iac-deploy, iac-admin)
+#   Secrets: Proxmox, FortiGate, DNS, RADIUS, SNMP, FreeRADIUS DB, PKI, Git
 
 # ============================================================================
 # IAC ORCHESTRATION HOST
 # ============================================================================
-# IaC Host: hbciac01.internal.boehmecke.org
-#   Container ID: 111 (on hbpm01)
-#   Network: VLAN 20 (IaC Zone), 192.168.190.66/28
-#   OS: Ubuntu 24.04 LTS
+# Server: hbciac01.internal.boehmecke.org
+#   CTID: 111 | VLAN 20 | 192.168.190.66/28
+#   Workspace: /opt/persistent/
 #   Software: Terraform, Ansible, Vault CLI
-#   Workspace: /opt/persistent/ (persistent LVM volume: data-hbciac01-iac)
-#
-# Access:
-#   From: hbcsrv14 (admin SSH)
-#   To: Vault (hbcvau01), Proxmox API (hbpm01), FortiGate API, DNS
-#
-# Workflow:
-#   1. source /opt/persistent/vault-init.sh
-#   2. cd terraform && terraform apply
-#   3. cd ../ansible && ansible-playbook playbooks/site.yml
-#
-# Git Remote:
-#   https://git.internal.boehmecke.org/boehmecke.org/Infrastructure-as-Code.git
 
 # ============================================================================
 # COMMON DISK SPACE ISSUES
 # ============================================================================
-# These hosts/paths frequently fill up:
-#
-# hbcsrv13 (monitoring):
-#   - /var/log: Syslog from all devices
-#   - MySQL syslog database grows quickly
-#   - Check: journalctl --disk-usage, du -sh /var/log/*
-#
-# hbvsrv15 (homeassistant):
-#   - Home Assistant database (history/statistics)
-#   - Check: du -sh /home/homeassistant/.homeassistant/*.db
-#
-# hbcsrv12 (mysql):
-#   - Binary logs, slow query logs
-#   - Large databases: syslog, observium2023, homeassistant
-#   - Check: du -sh /var/lib/mysql/*, SHOW BINARY LOGS
-#
-# hbpm01 (proxmox):
-#   - Old backup files if HBLAN was unavailable
-#   - Container/VM images
-#   - Check: du -sh /var/lib/vz/*, pvesm status
+# hbcsrv13: /var/log, MySQL syslog database
+# hbvsrv15: Home Assistant database
+# hbcsrv12: Binary logs, large databases
+# hbpm01: Old backup files, container images
 
 # ============================================================================
 # IGNORED DISK ALERTS
 # ============================================================================
-# These mounts are designed to be nearly full, ignore alerts:
-#
 hblanmc:/mnt/ext
 hblanmc:/samba_third_party
 hblanmc:/new_root
